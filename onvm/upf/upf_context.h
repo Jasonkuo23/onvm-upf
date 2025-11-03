@@ -6,6 +6,8 @@
 #include <net/if.h>
 #include <pthread.h>
 
+#include <rte_malloc.h>
+
 #include "utlt_list.h"
 #include "utlt_buff.h"
 #include "utlt_event.h"
@@ -29,6 +31,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif /* __cplusplus */
+
+extern list_t *g_all_pdr_list;
+
 
 typedef struct _UpfUeIp      UpfUeIp;
 
@@ -142,6 +147,41 @@ typedef struct _UpfSession {
     bool srr_flag;
 } UpfSession;
 
+typedef struct {
+    Status  status;
+    UpfPDR  *pdr;
+} UpfDeregResult;
+
+
+/* Sender frees the Event ONLY on send failure.
+   Receiver frees on success */
+
+/* static inline int UpfSendEvt1(uint16_t dest_sid, uint32_t type, uintptr_t a0) {
+    Event *e = (Event *)rte_calloc("upf_evt", 1, sizeof(*e), 0);
+    if (!e) return -1;
+    e->type = (uintptr_t)type;
+    e->argc = 1;
+    e->arg0 = a0;
+    int rc = onvm_nflib_send_msg_to_nf(dest_sid, e);
+    if (rc < 0) rte_free(e);
+    return rc;
+}
+
+// Optional: if we ever need two args
+static inline int UpfSendEvt2(uint16_t dest_sid, uint32_t type, uintptr_t a0, uintptr_t a1) {
+    Event *e = (Event *)rte_calloc("upf_evt", 1, sizeof(*e), 0);
+    if (!e) return -1;
+    e->type = (uintptr_t)type;
+    e->argc = 2;
+    e->arg0 = a0;
+    e->arg1 = a1;
+    int rc = onvm_nflib_send_msg_to_nf(dest_sid, e);
+    if (rc < 0) rte_free(e);
+    return rc;
+}
+ */
+
+
 UpfContext *Self();
 Status UpfContextInit();
 Status UpfContextTerminate();
@@ -180,6 +220,12 @@ UpfQER *UpfQERFindByID(UpfSession *session, uint16_t id);//implement//V
 Status UpfPDRDeregisterToSessionByID(UpfSession *session, uint16_t id);
 Status UpfFARDeregisterToSessionByID(UpfSession *session, uint16_t id);
 Status UpfQERDeregisterToSessionByID(UpfSession *session, uint16_t id);//implement//V
+
+UpfDeregResult UpfPDRDeregisterToSessionByIDEx(UpfSession *session, uint16_t id);
+
+void UpfPDRGlobalInit(void);
+void UpfPDRGlobalAdd(UpfPDR *pdr);
+void UpfPDRGlobalRemove(UpfPDR *pdr);
 
 #ifdef __cplusplus
 }
