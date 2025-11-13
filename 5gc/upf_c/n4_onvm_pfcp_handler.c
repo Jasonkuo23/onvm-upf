@@ -22,6 +22,8 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 
+#include <rte_memory.h>
+
 #include "onvm_nflib.h"
 
 #include "utlt_list.h"
@@ -32,11 +34,330 @@
 #include "pfcp_xact.h"
 #include "pfcp_convert.h"
 #include "n4_onvm_pfcp_build.h"
+#include "upf_events.h"
+#include "upf_cls_ctrl.h"
 
 #include "updk/rule.h"
 #include "updk/rule_pdr.h"
 #include "updk/rule_far.h"
 #include "updk/rule_qer.h"
+
+#include "../classifiers/classifier_wrapper.h"
+#include "../classifiers/upf_cls_adapter.h"
+
+
+// for logging
+/* #include <inttypes.h>
+#include <rte_hexdump.h> */
+
+
+typedef struct {
+    uint32_t ver;     /* even seq from publish (seqlock) */
+    UpfPDR  *pdr;     /* pointer cookie published in snapshots < ver */
+} pdr_retire_t;
+
+static pdr_retire_t *g_pdr_retire = NULL;
+static uint32_t      g_pdr_retire_len = 0;
+static uint32_t      g_pdr_retire_cap = 0;
+static uint32_t      g_pdr_head       = 0;
+
+static inline void PdrRetireQEnsure(uint32_t need_extra) {
+    uint32_t need = g_pdr_retire_len + need_extra;
+    if (need <= g_pdr_retire_cap) return;
+    uint32_t new_cap = g_pdr_retire_cap ? g_pdr_retire_cap : 64;
+    while (new_cap < need) new_cap <<= 1;
+    pdr_retire_t *nv = (pdr_retire_t *)rte_realloc(g_pdr_retire, new_cap * sizeof(*nv), RTE_CACHE_LINE_SIZE);
+    if (likely(nv)) {
+        g_pdr_retire = nv;
+        g_pdr_retire_cap = new_cap;
+    } else {
+        UTLT_Error("OOM growing PDR retire queue (need=%u)", new_cap);
+    }
+}
+
+/* Compact when head has marched far to keep memory bounded (not hot-path) */
+static inline void PdrRetireQMaybeCompact(void) {
+    if (g_pdr_head == 0) return;
+    /* Compact if more than half consumed or the head is large */
+    if (g_pdr_head < (g_pdr_retire_len >> 1) && g_pdr_head < 4096) return;
+    uint32_t tail = g_pdr_retire_len - g_pdr_head;
+    if (tail) memmove(g_pdr_retire, g_pdr_retire + g_pdr_head, tail * sizeof(*g_pdr_retire));
+    g_pdr_retire_len = tail;
+    g_pdr_head = 0;
+}
+
+/* Enqueue a PDR to free after ACK(ver) */
+static inline void PdrDeferFree(UpfPDR *p, uint32_t ver) {
+    if (!p) return;
+    PdrRetireQEnsure(1);
+    if (unlikely(g_pdr_retire_len >= g_pdr_retire_cap)) return; /* already logged above */
+    g_pdr_retire[g_pdr_retire_len++] = (pdr_retire_t){ .ver = ver, .pdr = p };
+}
+
+/* Free all PDRs whose retire-version <= ack_ver (ACKs arrive in order) */
+static inline void PdrFreeUpTo(uint32_t ack_ver) {
+    while (g_pdr_head < g_pdr_retire_len && g_pdr_retire[g_pdr_head].ver <= ack_ver) {
+        UpfPDR *p = g_pdr_retire[g_pdr_head].pdr;
+        /* If UpfPDR owns sub-objects, free them here before freeing p */
+        rte_free(p);
+        g_pdr_head++;
+    }
+    PdrRetireQMaybeCompact();
+}
+
+
+/* Publish a freshly built immutable snapshot into the shared control slot.
+ * Returns the new monotonically increasing version.
+ * If retired_out != NULL, *retired_out receives the previously active pointer. */
+/* static inline uint32_t upf_cls_publish(void *new_snap, void **retired_out) {
+    // Publish order: snapshot contents (already built) → pointer → version
+    rte_wmb();
+    void *old = g_upf_cls_ctrl->active;
+    g_upf_cls_ctrl->active = new_snap;
+    rte_wmb();
+    uint32_t v = g_upf_cls_ctrl->version + 1u;
+    g_upf_cls_ctrl->version = v;
+    if (retired_out) *retired_out = old;
+    return v;
+} */
+
+
+/* Publish a freshly built immutable snapshot into the shared control slot.
+ * Seqlock semantics:
+ *   - version odd  => writer in progress
+ *   - version even => stable, usable
+ * Returns the new even version. If retired_out != NULL, *retired_out gets
+ * the previously active pointer.
+ */
+static inline uint32_t upf_cls_publish(void *new_snap, void **retired_out) {
+    /* start = prev + 1 (odd) signals "writer active" */
+    uint32_t start = __atomic_load_n(&g_upf_cls_ctrl->version, __ATOMIC_RELAXED) + 1u;
+    __atomic_store_n(&g_upf_cls_ctrl->version, start, __ATOMIC_RELEASE);
+
+    /* Swap the pointer (get old for GC), then close the seqlock with even */
+    void *old = __atomic_exchange_n(&g_upf_cls_ctrl->active, new_snap, __ATOMIC_ACQ_REL);
+
+    /* publish even version = start + 1 */
+    uint32_t stable = start + 1u;
+    __atomic_store_n(&g_upf_cls_ctrl->version, stable, __ATOMIC_RELEASE);
+
+    if (retired_out) *retired_out = old;
+    return stable;
+}
+
+
+static void *g_cls_retired_snapshot = NULL;
+static uint32_t g_cls_retired_version = 0;
+
+
+// bool UpfClsRebuildAndPublish(uint32_t *out_version) {
+//     cls_handle_t *snap = cls_create(CLS_SELECTED_BACKEND_ID);
+//     if (!snap) {
+//         UTLT_Error("Classifier snapshot create failed");
+//         return false;
+//     }
+
+//     // size_t inserted = 0;
+//     list_iterator_t *it = list_iterator_new(g_all_pdr_list, LIST_HEAD);
+//     for (list_node_t *n; it && (n = list_iterator_next(it)); ) {
+//         UpfPDR *up = (UpfPDR *)n->val;
+//         if (!up) continue;
+
+//         bool is_uplink = false;     // default to downlink / CORE 
+
+//         if (up->flags.pdi && up->pdi.flags.sourceInterface) {
+
+//             UTLT_Debug("CreatePDR: PDI.SourceInterface IE present, value=%u", up->pdi.sourceInterface);
+
+//             switch (up->pdi.sourceInterface) {
+//             case 0:        
+//                 // N3 side (Uplink: UE → UPF)  
+//                 is_uplink = true;  
+//                 break;
+//             case 1:
+//                 // N6 side  (Downlink: DN → UE)
+//                 is_uplink = false;
+//                 break;
+
+//             default:  // unexpected value ⇒ treating as downlink
+//                 UTLT_Warning("CreatePDR: unexpected SourceInterface=%u – treating as CORE",
+//                             up->pdi.sourceInterface);
+//                 break;
+//             }
+//         } else {
+//             /* Spec violation: Source-Interface missing – assume downlink */
+//             UTLT_Warning("CreatePDR: SourceInterface IE missing – treating as CORE");
+//         }
+
+//         pdr_t r    = updk_pdr_to_cls_rule(up, is_uplink);
+
+//         r.descriptor = (uintptr_t)up; // 'up' is UpfPDR* 
+//         //r.descriptor = (uintptr_t)up->pdrId;
+
+//         uintptr_t desc = cls_insert_rule(snap, &r);
+//         if (unlikely(desc == 0)) {
+//             UTLT_Error("cls_insert_rule failed for PDR id=%u", (unsigned)up->pdrId);
+//             // Fail hard: destroy snapshot and keep the previous active one
+//             if (it) {
+//                 list_iterator_destroy(it);
+//             }
+//             cls_destroy(snap);
+//             return false;
+//         }
+//         //inserted++;
+//     }
+//     if (it) list_iterator_destroy(it);
+
+//     // sanity: allow empty snapshots, but warn
+//     /* if (inserted == 0) {
+//         UTLT_Warning("Rebuilt empty classifier snapshot");
+//     } */
+
+//     void *retired = NULL;
+//     uint32_t ver  = upf_cls_publish((void *)snap, &retired);
+
+//     // remove this later after testing
+//     if (likely(ver != 0)) {  // or: if (publish_succeeded)
+//         __atomic_store_n(&g_cls_retired_snapshot, retired, __ATOMIC_RELEASE);
+//         __atomic_store_n(&g_cls_retired_version,  ver,     __ATOMIC_RELEASE);
+
+//         // (optional) log
+//         UTLT_Info("CLS publish: retired=%p ver=%u", retired, ver);
+
+//         // Now notify DP to flip
+//         UpfSendEvt1(UPF_U_SERVICE_ID, EVT_CLS_GC_REQ, ver);
+//     } else {
+//         // publish failed: DO NOT touch g_cls_retired_* and DO NOT send REQ
+//     }
+    
+//     // open this later after testing atomic (I did not)
+//     /* g_cls_retired_snapshot = retired;
+//     g_cls_retired_version  = ver; */
+
+//     /* // logging block
+//     // deep publish diagnostics
+//     void *handle = (void *)snap;                  // published handle
+//     void *engine = handle ? *(void**)handle : NULL;      // first word in handle
+//     void *vptr   = engine ? *(void**)engine : NULL;      // first word in engine = vtable ptr (if C++) */
+
+//     /* UTLT_Info("CLS publish: handle=%p iova=%"PRIu64"  engine=%p iova=%"PRIu64"  vptr=%p",
+//             handle, (uint64_t)rte_mem_virt2iova(handle),
+//             engine, (uint64_t)rte_mem_virt2iova(engine),
+//             vptr);
+
+//     if (handle) rte_hexdump(stdout, "CP cls_handle head", handle, 32);
+//     if (engine) rte_hexdump(stdout, "CP engine head",     engine, 32); */
+
+//     // logging block
+
+
+//     (void)UpfSendEvt1(UPF_U_SERVICE_ID, EVT_CLS_GC_REQ, (uintptr_t)ver);
+//     if (out_version) {
+//         *out_version = ver;
+//     }
+//     return true;
+// }
+
+
+bool UpfClsRebuildAndPublish(uint32_t *out_version) {
+    cls_handle_t *snap = cls_create(CLS_SELECTED_BACKEND_ID);
+    if (!snap) {
+        UTLT_Error("Classifier snapshot create failed");
+        return false;
+    }
+
+    list_iterator_t *it = list_iterator_new(g_all_pdr_list, LIST_HEAD);
+    for (list_node_t *n; it && (n = list_iterator_next(it)); ) {
+        UpfPDR *up = (UpfPDR *)n->val;
+        if (!up) continue;
+
+        bool is_uplink = false;  /* default to downlink / CORE */
+
+        if (up->flags.pdi && up->pdi.flags.sourceInterface) {
+            UTLT_Debug("CreatePDR: PDI.SourceInterface IE present, value=%u",
+                       up->pdi.sourceInterface);
+            switch (up->pdi.sourceInterface) {
+            case 0: /* ACCESS (N3) → Uplink UE→UPF */
+                is_uplink = true;  break;
+            case 1: /* CORE   (N6) → Downlink DN→UE */
+                is_uplink = false; break;
+            default:
+                UTLT_Warning("CreatePDR: unexpected SourceInterface=%u – treating as CORE",
+                             up->pdi.sourceInterface);
+                break;
+            }
+        } else {
+            /* Spec violation: Source-Interface missing – assume downlink */
+            UTLT_Warning("CreatePDR: SourceInterface IE missing – treating as CORE");
+        }
+
+        pdr_t r = updk_pdr_to_cls_rule(up, is_uplink);
+
+        /* Pointer/descriptor cookie: publish the exact UpfPDR* */
+        r.descriptor = (uintptr_t)up;
+
+        uintptr_t desc = cls_insert_rule(snap, &r);
+        if (unlikely(desc == 0)) {
+            UTLT_Error("cls_insert_rule failed for PDR id=%u", (unsigned)up->pdrId);
+            if (it) list_iterator_destroy(it);
+            cls_destroy(snap);
+            return false;
+        }
+    }
+    if (it) list_iterator_destroy(it);
+
+    /* Publish with seqlock; version is even & monotonically increasing */
+    void    *retired = NULL;
+    uint32_t ver     = upf_cls_publish((void *)snap, &retired);
+
+    /* Cache the retired snapshot only if there was one */
+    if (retired) {
+        __atomic_store_n(&g_cls_retired_snapshot, retired, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_cls_retired_version,  ver,     __ATOMIC_RELEASE);
+        UTLT_Debug("CLS publish: new=%p retired=%p ver=%u", snap, retired, ver);
+    } else {
+        UTLT_Debug("CLS publish: new=%p retired=<none> ver=%u", snap, ver);
+    }
+
+    /* Notify DP exactly once to flip to this version */
+    UpfSendEvt1(UPF_U_SERVICE_ID, EVT_CLS_GC_REQ, (uintptr_t)ver);
+
+    if (out_version) *out_version = ver;
+    return true;
+}
+
+
+
+//  C-plane msg handler will free on ACK via this
+/* void UpfClsOnAckFree(uint32_t ver) {
+    if (ver == g_cls_retired_version && g_cls_retired_snapshot) {
+        // logging block
+        UTLT_Info("CLS GC: ACK ver=%u, freeing retired snapshot %p",
+                  ver, g_cls_retired_snapshot);
+        cls_destroy((cls_handle_t*)g_cls_retired_snapshot);
+        g_cls_retired_snapshot = NULL;
+    }
+} */
+
+void UpfClsOnAckFree(uint32_t ver) {
+    // Acquire load so we compare against a coherent value
+    uint32_t rver = __atomic_load_n(&g_cls_retired_version, __ATOMIC_ACQUIRE);
+    if (ver != rver) return;
+
+    // Atomic exchange to NULL to make it double-free proof
+    void *to_free = __atomic_exchange_n(&g_cls_retired_snapshot, NULL, __ATOMIC_ACQ_REL);
+    if (!to_free) return;  // already freed
+
+    UTLT_Debug("CLS GC: ACK ver=%u, freeing retired snapshot %p", ver, to_free);
+    cls_destroy((cls_handle_t*)to_free);
+
+    // Optional: clear version (release) so duplicate ACKs are cheap no-ops
+    __atomic_store_n(&g_cls_retired_version, 0, __ATOMIC_RELEASE);
+    PdrFreeUpTo(ver);
+}
+
+
+
 
 /*
  * Note: When apply a IE from PDR or FAR, you should check all
@@ -278,8 +599,20 @@ Status UpfN4HandleCreatePdr(UpfSession *session, CreatePDR *createPdr) {
 
     // Register PDR to Session
     UTLT_Assert(UpfPDRRegisterToSession(session, upfPdr),
+                rte_free(upfPdr);
                 return STATUS_ERROR,
                 "UpfPDRRegisterToSession failed");
+
+    UpfPDRGlobalAdd(upfPdr);
+
+    uint32_t new_ver;
+    if (!UpfClsRebuildAndPublish(&new_ver)) {
+        UTLT_Error("Classifier insert failed for PDRId=%u", upfPdr->pdrId);
+        UpfPDRDeregisterToSessionByID(session, upfPdr->pdrId);
+        UpfPDRGlobalRemove(upfPdr);
+        rte_free(upfPdr);
+        return STATUS_ERROR;
+    }
     return STATUS_OK;
 }
 
@@ -744,6 +1077,13 @@ Status UpfN4HandleUpdatePdr(UpfSession *session, UpdatePDR *updatePdr) {
     UTLT_Assert(UpfPDRRegisterToSession(session, &upfPdr),
         return STATUS_ERROR, "UpfPDRRegisterToSession failed");
 #endif
+
+    uint32_t new_ver;
+    if (!UpfClsRebuildAndPublish(&new_ver)) {
+        UTLT_Error("Classifier update failed; keeping existing PDR object alive (id=%u)", upfPdr->pdrId);
+        return STATUS_ERROR;
+    }
+
     return STATUS_OK;
 }
 
@@ -1024,11 +1364,30 @@ Status UpfN4HandleRemovePdr(UpfSession *session, uint16_t nPDRID) {
 
     //TODO(vivek): remove buffered packets
 
-    // Deregister PDR to Session
-    UTLT_Assert(UpfPDRDeregisterToSessionByID(session, pdrID) == STATUS_OK,
-                return STATUS_ERROR,
-                "UpfPDRDeregisterToSessionBy failed");
 
+    // Deregister PDR to Session
+    /* UTLT_Assert(UpfPDRDeregisterToSessionByID(session, pdrID) == STATUS_OK,
+                return STATUS_ERROR,
+                "UpfPDRDeregisterToSessionBy failed"); */
+
+    UpfDeregResult d = UpfPDRDeregisterToSessionByIDEx(session, pdrID);
+    UTLT_Assert(d.status == STATUS_OK,
+                return STATUS_ERROR,
+                "UpfPDRDeregisterToSessionByIDEx failed for PDR[%u]", pdrID);
+
+    UpfPDR *upfPdr = d.pdr;   /* pointer to the removed PDR */
+
+    UpfPDRGlobalRemove(upfPdr);
+ 
+    uint32_t new_ver;
+    if (!UpfClsRebuildAndPublish(&new_ver)) {
+        UTLT_Error("Classifier update failed while PDR deletion");
+        UpfPDRRegisterToSession(session, upfPdr);
+        UpfPDRGlobalAdd(upfPdr);
+        return STATUS_ERROR;
+    }
+
+    PdrDeferFree(upfPdr, new_ver);
     return STATUS_OK;
 }
 

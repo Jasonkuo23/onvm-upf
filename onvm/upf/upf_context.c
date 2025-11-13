@@ -10,6 +10,8 @@
 #include <net/if.h>
 
 #include <rte_byteorder.h>
+#include <rte_memzone.h>
+#include <rte_malloc.h>
 
 #include "utlt_debug.h"
 #include "utlt_pool.h"
@@ -26,11 +28,82 @@
 #include "updk/init.h"
 #include "updk/rule.h"
 
+#include "upf_cls_ctrl.h"
+
+/* // for logging
+
+#include <inttypes.h>
+#include <rte_hexdump.h> */
+
+
 #define MAX_NUM_OF_SUBNET       16
 
 static UpfContext self;
 static _Bool upfContextInitialized = 0;
 static uint64_t g_sessionIdPool = 1;
+
+upf_cls_ctrl_t *g_upf_cls_ctrl = NULL;
+
+list_t *g_all_pdr_list = NULL;
+
+
+void UpfPDRGlobalInit(void) {
+    if (!g_all_pdr_list) {
+        g_all_pdr_list = list_new();
+    }
+}
+
+void UpfPDRGlobalAdd(UpfPDR *pdr) {
+    if (!pdr) {
+        return;
+    }
+    if (!g_all_pdr_list) {
+        g_all_pdr_list = list_new();
+    }
+    list_rpush(g_all_pdr_list, list_node_new(pdr));
+}
+
+void UpfPDRGlobalRemove(UpfPDR *pdr) {
+    if (!g_all_pdr_list || !pdr) {
+        return;
+    }
+    list_iterator_t *it = list_iterator_new(g_all_pdr_list, LIST_HEAD);
+    for (list_node_t *n; (n = list_iterator_next(it)); ) {
+        if ((UpfPDR *)n->val == pdr) { 
+            list_remove(g_all_pdr_list, n);
+            break;
+        }
+    }
+    list_iterator_destroy(it);
+}
+
+
+int UpfClsCtrlInit(void) {
+    const struct rte_memzone *mz = rte_memzone_lookup(MZ_UPF_CLS_CTRL);
+    if (!mz) {
+        mz = rte_memzone_reserve_aligned(
+            MZ_UPF_CLS_CTRL, sizeof(upf_cls_ctrl_t),
+            SOCKET_ID_ANY, RTE_MEMZONE_2MB, RTE_CACHE_LINE_SIZE);
+        if (!mz) return -1;
+
+        /* We are the creator: initialize to a stable, empty state.
+           version must be EVEN (stable). 0 is perfect. */
+        upf_cls_ctrl_t *ctrl = (upf_cls_ctrl_t *)mz->addr;
+        __atomic_store_n(&ctrl->active,  NULL, __ATOMIC_RELEASE);
+        __atomic_store_n(&ctrl->version, 0u,   __ATOMIC_RELEASE);
+    }
+
+    g_upf_cls_ctrl = (upf_cls_ctrl_t *)mz->addr;
+
+    // logging block
+    /* UTLT_Info("CLS_CTRL mapped: slot=%p iova=%" PRIu64 " active=%p ver=%u",
+          (void*)g_upf_cls_ctrl,
+          (uint64_t)rte_mem_virt2iova(g_upf_cls_ctrl),
+          (void*)g_upf_cls_ctrl->active,
+          g_upf_cls_ctrl->version); */
+
+    return 0;
+}
 
 UpfContext *Self() {
     return &self;
@@ -119,6 +192,37 @@ Status UpfPDRDeregisterToSessionByID(UpfSession *session, uint16_t id) {
     list_remove(session->pdr_list, node);
     return STATUS_OK;
 }
+
+
+UpfDeregResult UpfPDRDeregisterToSessionByIDEx(UpfSession *session, uint16_t id) {
+    
+    UpfDeregResult  res = { 
+        .status = STATUS_ERROR,
+        .pdr = NULL
+    };
+
+    UTLT_Assert(session, return res, "session not found");
+    UTLT_Assert(session->pdr_list, return res, "PDR list not initialized");
+
+    list_node_t *node = NULL;
+    list_iterator_t *it = list_iterator_new(session->pdr_list, LIST_HEAD);
+    
+    while ((node = list_iterator_next(it))) {
+        UpfPDR *p = (UpfPDR *)node->val;
+        if (p->pdrId == id) {
+            res.pdr = p;      // stash it
+            break;
+        }
+    }
+    list_iterator_destroy(it);
+
+    UTLT_Assert(node, return res, "PDR ID[%u] does NOT exist", id);
+    list_remove(session->pdr_list, node);
+    res.status = STATUS_OK;
+    return res;
+}
+
+
 
 Status UpfFARDeregisterToSessionByID(UpfSession *session, uint16_t id) {
     UTLT_Assert(session, return STATUS_ERROR, "session not found error");
