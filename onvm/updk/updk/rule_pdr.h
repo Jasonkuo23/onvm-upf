@@ -259,6 +259,9 @@ typedef struct {
     uint32_t farId;
     UPDK_FAR *far;
     UPDK_QER *qer;
+
+    UPDK_QER *qers[2];
+    uint8_t   qer_count;
     
     // handle multiple URR
     uint32_t urrId[4];

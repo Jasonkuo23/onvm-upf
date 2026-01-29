@@ -597,37 +597,36 @@ findIndexByUeIpAddress(uint32_t ue_ip) {
     return index;
 }
 
-void
-addEntrybyUeIp(uint32_t ue_ip, uint32_t ue_ambr, uint32_t ue_gbr,uint32_t ue_mbr) {
+int
+addEntrybyUeIp(uint32_t ue_ip, uint32_t ue_ambr, uint32_t ue_gbr, uint32_t ue_mbr) {
     for (int i = 0; i < MAX_UE; i++) {
         if (ue_table[i].ue_ip == 0) { // find unused
             ue_table[i].ue_ip = ue_ip;
             ue_table[i].ue_ambr = ue_ambr;
             ue_table[i].ue_gbr = ue_gbr;
 
-            uint32_t qos_rate = MIN((ue_gbr + (ue_ambr-ue_gbr)/2), ue_mbr);
+            uint32_t qos_rate = MIN((ue_gbr + (ue_ambr - ue_gbr) / 2), ue_mbr);
 
-            ue_table[i].ue_qos_tb_params.tb_rate = qos_rate/1000;
+            ue_table[i].ue_qos_tb_params.tb_rate = qos_rate / 1000;
             ue_table[i].ue_qos_tb_params.tb_depth = qos_rate;
             ue_table[i].ue_qos_tb_params.tb_tokens = qos_rate;
             ue_table[i].ue_qos_tb_params.last_cycle = rte_get_tsc_cycles();
-            ue_table[i].ue_qos_tb_params.cur_cycles = rte_get_tsc_cycles(); 
+            ue_table[i].ue_qos_tb_params.cur_cycles = rte_get_tsc_cycles();
             UTLT_Info("QoS Rate: %d", qos_rate);
 
             uint32_t nqos_rate = ue_ambr - qos_rate;
 
-            ue_table[i].ue_nqos_tb_params.tb_rate = nqos_rate/1000;
+            ue_table[i].ue_nqos_tb_params.tb_rate = nqos_rate / 1000;
             ue_table[i].ue_nqos_tb_params.tb_depth = nqos_rate;
             ue_table[i].ue_nqos_tb_params.tb_tokens = nqos_rate;
             ue_table[i].ue_nqos_tb_params.last_cycle = rte_get_tsc_cycles();
             ue_table[i].ue_nqos_tb_params.cur_cycles = rte_get_tsc_cycles();
-            UTLT_Info("non QoS Rate: %d", nqos_rate); 
+            UTLT_Info("non QoS Rate: %d", nqos_rate);
 
-
-            break;
+            return i;  // Return the allocated index
         }
     }
-    return;
+    return -1;  // Table full
 }
 
 void 
@@ -887,48 +886,54 @@ GetQerByUEIpAddress(uint32_t ue_ip, char *IP) {
     }
 }
 
-/* Populate UE table using the already-classified UPDK_PDR (no session/pdr_list scan).
- * DL-only: uses qer->*.dl fields.
- * Returns NULL to match the old function style. */
-static inline void *
+/* Populate UE table using the already-classified UPDK_PDR (no session/pdr_list scan)*/
+static inline int
 GetQerByUEIpAddressFromPdr(uint32_t ue_ip, const UPDK_PDR *pdr, const char *ip_str)
 {
-    if ((int)findIndexByUeIpAddress(ue_ip) != -1) {
-        UTLT_Trace("The UE IP already exists in the table");
-        return NULL;
-    }
-
-    if (!pdr || !pdr->qer) {
-        UTLT_Warning("UE %s: no PDR/QER, cannot populate UE table",
-                     ip_str ? ip_str : "<unknown>");
-        return NULL;
-    }
-
-    const UPDK_QER *qer = pdr->qer;
-
-    /* Respect presence; avoid using uninitialized values */
-    if (!qer->flags.maximumBitrate || qer->maximumBitrate.dl == 0) {
-        UTLT_Trace("UE %s: no DL MBR, skip UE table entry",
+    if (!pdr || pdr->qer_count == 0) {
+        UTLT_Trace("UE %s: No PDR or PDR has no QERs, skip UE table entry",
                    ip_str ? ip_str : "<unknown>");
-        return NULL;
+        return -1;
     }
 
-    /* Clamp 64-bit PFCP rates into 32-bit UE table fields */
-    uint64_t mbr64  = qer->maximumBitrate.dl;
-    uint64_t gbr64  = qer->flags.guaranteedBitrate ? qer->guaranteedBitrate.dl : 0;
+    uint64_t ambr64 = 0;
+    uint64_t gbr64  = 0;
+    uint64_t mbr64  = 0;
 
-    uint32_t mbr  = (mbr64 > UINT32_MAX) ? UINT32_MAX : (uint32_t)mbr64;
-    uint32_t ambr = mbr;  /* with only one PDR/QER, AMBR ~= MBR */
-    uint32_t gbr  = (gbr64 > UINT32_MAX) ? UINT32_MAX : (uint32_t)gbr64;
+    int n = (int)pdr->qer_count;
+    if (n > 2) n = 2; /* safety; struct currently supports 2 */
 
-    /* Prevent unsigned underflow in addEntrybyUeIp() math if CP gives weird values */
-    if (gbr > mbr) gbr = mbr;
+    for (int i = 0; i < n; i++) {
+        const UPDK_QER *q = pdr->qers[i];
+        if (!q) continue;
+
+        if (q->flags.maximumBitrate && q->maximumBitrate.dl > ambr64)
+            ambr64 = q->maximumBitrate.dl;
+
+        /* old behavior: only set gbr/mbr when both flags are present */
+        if (q->flags.guaranteedBitrate && q->flags.maximumBitrate) {
+            gbr64 = q->guaranteedBitrate.dl;
+            mbr64 = q->maximumBitrate.dl;
+        }
+    }
+
+    if (ambr64 == 0) {
+        UTLT_Trace("UE %s: no DL MBR across PDR QERs, skip UE table entry",
+                   ip_str ? ip_str : "<unknown>");
+        return -1;
+    }
+
+    /* Clamp PFCP 64-bit rates into 32-bit UE table fields */
+    uint32_t ambr = (ambr64 > UINT32_MAX) ? UINT32_MAX : (uint32_t)ambr64;
+    uint32_t gbr  = (gbr64  > UINT32_MAX) ? UINT32_MAX : (uint32_t)gbr64;
+    uint32_t mbr  = (mbr64  > UINT32_MAX) ? UINT32_MAX : (uint32_t)mbr64;
+
+    if (mbr && gbr > mbr) gbr = mbr;
 
     UTLT_Warning("Add UE IP: %s, AMBR: %u GBR: %u, MBR: %u",
                  ip_str ? ip_str : "<unknown>", ambr, gbr, mbr);
 
-    addEntrybyUeIp(ue_ip, ambr, gbr, mbr);
-    return NULL;
+    return addEntrybyUeIp(ue_ip, ambr, gbr, mbr);
 }
 
 
@@ -1091,6 +1096,7 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
 
     UPDK_PDR *pdr = NULL;
     gtp_parse_result_t gtp_info = {0};
+    int ue_idx = -1;
 
     /* char *src_address = convertToIpAddress(iph->src_addr);
     UTLT_Info("Src IP is %s\n", src_address);
@@ -1124,7 +1130,11 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
     UTLT_Info("Got PDR ID is %u\n", pdr->pdrId);
 
     if (is_dl) {
-        GetQerByUEIpAddressFromPdr(rte_cpu_to_be_32(iph->dst_addr), pdr, convertToIpAddress(iph->dst_addr));
+        ue_idx = (int)findIndexByUeIpAddress(ue_key);
+        if (ue_idx < 0) {
+            ue_idx = GetQerByUEIpAddressFromPdr(rte_cpu_to_be_32(iph->dst_addr), pdr, convertToIpAddress(iph->dst_addr));
+        }
+        
     }
 
     rte_pktmbuf_adj(pkt, sizeof(struct rte_ether_hdr));
@@ -1166,13 +1176,8 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
     }
     AttachL2Header(pkt, is_dl);
     if (meta->action == ONVM_NF_ACTION_OUT && is_dl) {
-        // check if the UE IP exists in the table and update the token
-        int index = findIndexByUeIpAddress(rte_cpu_to_be_32(iph->dst_addr));
-        if (index != -1) {
-            UTLT_Trace("Update token for UE IP: %s", convertToIpAddress(iph->dst_addr));
-            updateTokenbyIndex(index);
-        }
-        else {
+
+        if (ue_idx < 0) {
             UTLT_Error("No UE IP found in the table");
             return status;
         }
@@ -1208,25 +1213,25 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
                 meta->action = ONVM_NF_ACTION_DROP;
             }
             if (meta->flags == RTE_COLOR_GREEN) {
-                ue_table[index].ue_qos_tb_params.tb_tokens -= cal_pktlen;
+                ue_table[ue_idx].ue_qos_tb_params.tb_tokens -= cal_pktlen;
                 meta->action = ONVM_NF_ACTION_OUT;
             }
             if (meta->flags == RTE_COLOR_YELLOW) {
-                while (ue_table[index].ue_qos_tb_params.tb_tokens < cal_pktlen) {
-                    updateTokenbyIndex(index);
+                while (ue_table[ue_idx].ue_qos_tb_params.tb_tokens < cal_pktlen) {
+                    updateTokenbyIndex(ue_idx);
                     usleep(1);
                 }
-                ue_table[index].ue_qos_tb_params.tb_tokens -= cal_pktlen;
+                ue_table[ue_idx].ue_qos_tb_params.tb_tokens -= cal_pktlen;
                 meta->action = ONVM_NF_ACTION_OUT;      
             }
         }
         // Step 2. bucket (non QoS flow)
         else {
-            while (ue_table[index].ue_nqos_tb_params.tb_tokens < cal_pktlen) {
-                updateTokenbyIndex(index);
+            while (ue_table[ue_idx].ue_nqos_tb_params.tb_tokens < cal_pktlen) {
+                updateTokenbyIndex(ue_idx);
                 usleep(1);
             }
-            ue_table[index].ue_nqos_tb_params.tb_tokens -= cal_pktlen;
+            ue_table[ue_idx].ue_nqos_tb_params.tb_tokens -= cal_pktlen;
             meta->action = ONVM_NF_ACTION_OUT;
         }
     }

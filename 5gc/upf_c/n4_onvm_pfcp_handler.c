@@ -593,8 +593,19 @@ Status UpfN4HandleCreatePdr(UpfSession *session, CreatePDR *createPdr) {
         //     upfPdr->qer = UpfQERFindByID(s1, upfPdr->qerId);
         //     UTLT_Assert(upfPdr->qer, rte_free(upfPdr); return STATUS_ERROR, "QER ID[%u] does NOT exist in UPF Context", upfPdr->qerId);
         // }
-        upfPdr->qer = UpfQERFindByID(session, upfPdr->qerId[0]);
-        UTLT_Assert(upfPdr->qer, rte_free(upfPdr); return STATUS_ERROR, "QER ID[%u] does NOT exist in UPF Context", upfPdr->qerId[0]);
+        upfPdr->qer_count = 0;
+        upfPdr->qers[0] = upfPdr->qers[1] = NULL;
+
+        for (int i = 0; i < 2; i++) {
+            uint32_t id = upfPdr->qerId[i];
+            if (!id) continue;
+
+            UpfQER *q = UpfQERFindByID(session, id);
+            UTLT_Assert(q, rte_free(upfPdr); return STATUS_ERROR, "QER ID[%u] does NOT exist in UPF Context", id);
+
+            upfPdr->qers[upfPdr->qer_count++] = q;   // packed list
+        }
+        upfPdr->qer = (upfPdr->qer_count > 0) ? upfPdr->qers[0] : NULL;
     }
 
     // Register PDR to Session
@@ -1031,15 +1042,33 @@ Status _ConvertUpdatePDRTlvToRule(UpfPDR *upfPdr, UpdatePDR *updatePDR) {
         }
     }
 
+    // if (updatePDR->qERID.presence) {
+    //     // TODO: Need to handle multiple QER
+    //     /*
+    //         upfPdr->flags.qerId = 1;
+    //     upfPdr->qerId = ntohl(*((uint32_t *)updatePDR->qERID.value));
+    //     UTLT_Debug("PDR QER ID: %u", upfPdr->qerId);
+    //     */
+    //     UTLT_Warning("UPF do NOT support QER yet");
+    // }
+
+
     if (updatePDR->qERID.presence) {
-        // TODO: Need to handle multiple QER
-        /*
-            upfPdr->flags.qerId = 1;
-        upfPdr->qerId = ntohl(*((uint32_t *)updatePDR->qERID.value));
-        UTLT_Debug("PDR QER ID: %u", upfPdr->qerId);
-        */
-        UTLT_Warning("UPF do NOT support QER yet");
+        upfPdr->flags.qerId = 1;
+        uint32_t new_id = ntohl(*((uint32_t *)updatePDR->qERID.value));
+
+        if (upfPdr->qerId[0] == new_id || upfPdr->qerId[1] == new_id) {
+            /* already associated -> no change */
+        } else if (upfPdr->qerId[0] == 0) {
+            upfPdr->qerId[0] = new_id;
+        } else if (upfPdr->qerId[1] == 0) {
+            upfPdr->qerId[1] = new_id;
+        } else {
+            UTLT_Warning("UpdatePDR: ignore QERID=%u; PDR[%u] already has QERIDs (%u,%u)",
+                        new_id, upfPdr->pdrId, upfPdr->qerId[0], upfPdr->qerId[1]);
+        }
     }
+
 
     if (updatePDR->activatePredefinedRules.presence) {
         // TODO: Need to support
@@ -1073,8 +1102,25 @@ Status UpfN4HandleUpdatePdr(UpfSession *session, UpdatePDR *updatePdr) {
     }
 
     if (upfPdr->flags.qerId) {
-        upfPdr->qer = UpfQERFindByID(session, upfPdr->qerId[0]);
-        UTLT_Assert(upfPdr->qer, return STATUS_ERROR, "QER ID[%u] does NOT exist in UPF Context", upfPdr->qerId[0]);
+        UpfQER  *new_qers[2] = { NULL, NULL };
+        uint8_t  new_cnt = 0;
+
+        for (int i = 0; i < 2; i++) {
+            uint32_t id = upfPdr->qerId[i];
+            if (!id) continue;
+
+            UpfQER *q = UpfQERFindByID(session, id);
+            UTLT_Assert(q, return STATUS_ERROR,
+                    "QER ID[%u] does NOT exist in UPF Context", id);
+
+            if (new_cnt < 2) new_qers[new_cnt++] = q;  // packed list
+        }
+
+        /* Commit only after all lookups succeeded */
+        upfPdr->qers[0] = new_qers[0];
+        upfPdr->qers[1] = new_qers[1];
+        upfPdr->qer_count = new_cnt;
+        upfPdr->qer = (new_cnt > 0) ? new_qers[0] : NULL; // legacy
     }
 
 #ifdef CHECK
