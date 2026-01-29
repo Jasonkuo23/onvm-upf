@@ -1130,11 +1130,11 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
     UTLT_Info("Got PDR ID is %u\n", pdr->pdrId);
 
     if (is_dl) {
+        uint32_t ue_key = rte_cpu_to_be_32(iph->dst_addr);
         ue_idx = (int)findIndexByUeIpAddress(ue_key);
         if (ue_idx < 0) {
-            ue_idx = GetQerByUEIpAddressFromPdr(rte_cpu_to_be_32(iph->dst_addr), pdr, convertToIpAddress(iph->dst_addr));
+            ue_idx = GetQerByUEIpAddressFromPdr(ue_key, pdr, convertToIpAddress(iph->dst_addr));
         }
-        
     }
 
     rte_pktmbuf_adj(pkt, sizeof(struct rte_ether_hdr));
