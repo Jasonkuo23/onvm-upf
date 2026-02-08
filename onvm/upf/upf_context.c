@@ -137,6 +137,9 @@ Status UpfContextInit() {
     // defined in utlt_3gpptypes instead of GTP_V1_PORT defined in GTP_PATH;
     self.gtpv1Port = GTPV1_U_UDP_PORT;
     self.pfcpPort = PFCP_UDP_PORT;
+    self.accessPort = 0;
+    self.corePort   = 1;
+    self.sgiPort    = 1;  // SGi follows CORE by convention
     strcpy(self.envParams->virtualDevice->deviceID, self.gtpDevNamePrefix);
 
     // Init Resource
