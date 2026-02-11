@@ -273,8 +273,7 @@ bool TreeInsertWithPathCompressionHelp(rb_red_blk_tree* tree, rb_red_blk_node* z
 				//unzipping the next level
 				int run = 1;
 		
-				std::vector<int> naturalFieldOrder(fieldOrder.size());
-				std::iota(begin(naturalFieldOrder), end(naturalFieldOrder), 0);
+				static constexpr FieldOrder naturalFieldOrder = {0, 1, 2, 3};
 				while ( (temp_chain_boxes[run][0] == b[fieldOrder[level + run]][0] && temp_chain_boxes[run][1] == b[fieldOrder[level + run]][1])) {
 					x->rb_tree_next_level = RBTreeCreate();
 					x->rb_tree_next_level->count = 1;
@@ -411,8 +410,7 @@ rb_red_blk_node * RBTreeInsertWithPathCompression(rb_red_blk_tree* tree, const s
 
 		//unzipping the next level 
 
-		std::vector<int> naturalFieldOrder(fieldOrderSize);
-		std::iota(begin(naturalFieldOrder), end(naturalFieldOrder), 0);
+		static constexpr FieldOrder naturalFieldOrder = {0, 1, 2, 3};
 		size_t run = 0; 
 		if (temp_chain_boxes[run][0] == key[fieldOrder[level + run]][0] && temp_chain_boxes[run][1] == key[fieldOrder[level + run]][1]) {
 			//  printf("[%u %u] vs. [%u %u]\n", temp_chain_boxes[run][0], temp_chain_boxes[run][1], key[fieldOrder[level + run]][0], key[fieldOrder[level + run]][1]);
