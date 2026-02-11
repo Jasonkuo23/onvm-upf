@@ -94,6 +94,7 @@ static inline int UpfSendEvt1(uint16_t dest_sid, uint32_t type, uintptr_t a0) {
 }
 
 static struct rte_ether_addr dn_eth;
+static struct rte_ether_addr an_eth;
 static struct rte_ether_addr cn_dn_eth;
 static struct rte_ether_addr cn_ue_eth;
 
@@ -547,16 +548,49 @@ initUeTable(){
     }
 }
 
+/* ── UE-IP → ue_table index hash (O(1) avg, replaces linear scan) ── */
+struct ue_hash_entry {
+    uint32_t ue_ip;
+    int      ue_idx;   /* index into ue_table[] */
+    bool     in_use;
+};
+static struct ue_hash_entry ue_hash[MAX_UE];
+
+static inline int ueHashFunc(uint32_t ip) { return ip % MAX_UE; }
+
+static void ueHashInit(void) {
+    for (int i = 0; i < MAX_UE; i++)
+        ue_hash[i].in_use = false;
+}
+
+/* Return ue_table index, or -1 */
+static inline int ueHashSearch(uint32_t ue_ip) {
+    int idx = ueHashFunc(ue_ip);
+    int start = idx;
+    while (ue_hash[idx].in_use) {
+        if (ue_hash[idx].ue_ip == ue_ip)
+            return ue_hash[idx].ue_idx;
+        idx = (idx + 1) % MAX_UE;
+        if (idx == start) break;
+    }
+    return -1;
+}
+
+static inline bool ueHashInsert(uint32_t ue_ip, int ue_idx) {
+    if (ueHashSearch(ue_ip) >= 0) return false; /* already present */
+    int idx = ueHashFunc(ue_ip);
+    while (ue_hash[idx].in_use)
+        idx = (idx + 1) % MAX_UE;
+    ue_hash[idx].ue_ip  = ue_ip;
+    ue_hash[idx].ue_idx = ue_idx;
+    ue_hash[idx].in_use = true;
+    return true;
+}
+
+/* Legacy wrapper — now O(1) via hash */
 uint32_t 
 findIndexByUeIpAddress(uint32_t ue_ip) {
-    int index = -1;
-    for (int i = 0; i < MAX_UE; i++) {
-        if (ue_table[i].ue_ip == ue_ip) {
-            index = i;
-            break;
-        }
-    }
-    return index;
+    return ueHashSearch(ue_ip);
 }
 
 int
@@ -585,6 +619,7 @@ addEntrybyUeIp(uint32_t ue_ip, uint32_t ue_ambr, uint32_t ue_gbr, uint32_t ue_mb
             ue_table[i].ue_nqos_tb_params.cur_cycles = rte_get_tsc_cycles();
             UTLT_Info("non QoS Rate: %d", nqos_rate);
 
+            ueHashInsert(ue_ip, i);
             return i;  // Return the allocated index
         }
     }
@@ -1013,12 +1048,7 @@ AttachL2Header(struct rte_mbuf *pkt, bool is_dl) {
     // next hop's mac address
     if (is_dl == true) {
         rte_ether_addr_copy(&cn_ue_eth, &eth_hdr->src_addr);
-        eth_hdr->dst_addr.addr_bytes[0] = AnMac[0];
-        eth_hdr->dst_addr.addr_bytes[1] = AnMac[1];
-        eth_hdr->dst_addr.addr_bytes[2] = AnMac[2];
-        eth_hdr->dst_addr.addr_bytes[3] = AnMac[3];
-        eth_hdr->dst_addr.addr_bytes[4] = AnMac[4];
-        eth_hdr->dst_addr.addr_bytes[5] = AnMac[5];
+        rte_ether_addr_copy(&an_eth, &eth_hdr->dst_addr);
 
     } else {
         rte_ether_addr_copy(&cn_dn_eth, &eth_hdr->src_addr);
@@ -1073,7 +1103,7 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
         pdr = GetPdrByTeid(pkt, &gtp_info);
 
     } else {
-        UTLT_Info("It is downlink, dst is %s\n", convertToIpAddress(iph->dst_addr));
+        // UTLT_Info("It is downlink, dst is %s\n", convertToIpAddress(iph->dst_addr));
         pdr = GetPdrByUeIpAddress(pkt, rte_cpu_to_be_32(iph->dst_addr));
         is_dl = true;
     }
@@ -1316,16 +1346,13 @@ main(int argc, char *argv[]) {
           g_access_port, g_core_port, g_sgi_port); */
 
     // 8c:dc:d4:ac:6c:7d
-    dn_eth.addr_bytes[0] = DnMac[0];
-    dn_eth.addr_bytes[1] = DnMac[1];
-    dn_eth.addr_bytes[2] = DnMac[2];
-    dn_eth.addr_bytes[3] = DnMac[3];
-    dn_eth.addr_bytes[4] = DnMac[4];
-    dn_eth.addr_bytes[5] = DnMac[5];
+    memcpy(dn_eth.addr_bytes, DnMac, RTE_ETHER_ADDR_LEN);
+    memcpy(an_eth.addr_bytes, AnMac, RTE_ETHER_ADDR_LEN);
 
     // trTCM
     trtcmConfigFlowTables();
     initUeTable();
+    ueHashInit();
 
     UpfSessionPoolInit();
     UeIpToUpfSessionMapInit();
