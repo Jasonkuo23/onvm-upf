@@ -50,7 +50,7 @@
 #include "../classifiers/upf_cls_adapter.h"
 #include "../classifiers/classifier_wrapper.h"
 
-#include "pdr_hash_bypass.h"  /* onvm/upf/ — shared with UPF-C */
+#include "pdr_hash_bypass.h"
 
 #include "upf_u_config.h"
 
