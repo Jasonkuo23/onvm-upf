@@ -26,6 +26,7 @@
 
 #include <rte_common.h>
 #include <rte_malloc.h>
+#include <rte_hash_crc.h>         /* SSE 4.2 CRC32 hardware hash          */
 
 #include "updk/rule_pdr.h"        /* UPDK_PDR  — resolves via onvm/updk/ */
 #include "classifier_wrapper.h"   /* ps_packet_t — resolves via 5gc/classifiers/ */
@@ -89,10 +90,12 @@ static inline void phb_destroy(phb_table_t *t) {
     if (t) rte_free(t);
 }
 
-/* Hash function — simple multiplicative hash for uint32_t keys */
+/* Hash function — hardware-accelerated CRC32 (SSE 4.2 instruction)
+ * Uses DPDK's rte_hash_crc_4byte() which compiles to a single CRC32
+ * instruction on x86.  Provides excellent distribution for integer keys
+ * with minimal latency (~3 cycles). */
 static inline uint32_t phb_hash32(uint32_t key, uint32_t n_buckets) {
-    /* Knuth multiplicative hash */
-    return (key * 2654435761u) >> (32 - __builtin_ctz(n_buckets));
+    return rte_hash_crc_4byte(key, 0) & (n_buckets - 1);
 }
 
 /* Insert a candidate into the appropriate bucket, keeping sorted by precedence.
