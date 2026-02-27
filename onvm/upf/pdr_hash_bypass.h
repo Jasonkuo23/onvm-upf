@@ -21,6 +21,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
 
@@ -148,6 +149,123 @@ phb_insert_candidate(phb_bucket_t *tbl, uint32_t n_buckets,
     }
 }
 
+/* Parse "A.B.C.D[/P]" into host-order IP + prefix length.
+ * No /P defaults to /32 (exact host).  Returns 0 with *pref_out=0 on error.
+ * Pure C mirror of the C++ parse_ip_prefix() in upf_cls_adapter.cpp. */
+static inline uint32_t
+phb_parse_ip_prefix(const char *s, uint8_t *pref_out)
+{
+    *pref_out = 0;
+    if (!s || !*s) return 0;
+
+    char buf[32];
+    size_t len = strlen(s);
+    if (len >= sizeof(buf)) return 0;
+    memcpy(buf, s, len + 1);
+
+    char *slash = strchr(buf, '/');
+    if (slash) {
+        *slash = '\0';
+        int p = atoi(slash + 1);
+        *pref_out = (p > 0 && p <= 32) ? (uint8_t)p : 32;
+    } else {
+        *pref_out = 32;
+    }
+
+    struct in_addr a;
+    if (inet_pton(AF_INET, buf, &a) != 1) {
+        *pref_out = 0;
+        return 0;
+    }
+    return ntohl(a.s_addr);   /* host byte order */
+}
+
+/* Parse a 3GPP flow description (IPFilterRule per TS 29.212 / RFC 6733)
+ * into the candidate's SDF fields for per-packet matching.
+ *
+ * Format:  action dir proto from src [srcport] to dst [dstport]
+ *
+ * Examples:
+ *   "permit out ip from assigned to any"
+ *   "permit out 17 from 10.60.0.1 5060 to any"
+ *   "permit in ip from any to assigned"
+ *
+ * Runs on UPF-C at PDR build time — never per-packet.
+ * c->ue_ip must already be set before calling this function. */
+static inline void
+phb_parse_flow_description(const char *fd, phb_candidate_t *c)
+{
+    if (!fd || !*fd) return;
+
+    /* Local copy — strtok_r modifies the buffer */
+    char buf[64];
+    size_t fdlen = strlen(fd);
+    if (fdlen >= sizeof(buf)) fdlen = sizeof(buf) - 1;
+    memcpy(buf, fd, fdlen);
+    buf[fdlen] = '\0';
+
+    char *saveptr = NULL;
+    char *tok;
+
+    /* Token 1: action (permit/deny) — skip */
+    tok = strtok_r(buf, " ", &saveptr);
+    if (!tok) return;
+
+    /* Token 2: direction (in/out) — skip (is_uplink from PDR) */
+    tok = strtok_r(NULL, " ", &saveptr);
+    if (!tok) return;
+
+    /* Token 3: protocol — "ip" = any (0), or numeric (6=TCP, 17=UDP) */
+    tok = strtok_r(NULL, " ", &saveptr);
+    if (!tok) return;
+    c->sdf_proto = (strcmp(tok, "ip") == 0) ? 0 : (uint8_t)atoi(tok);
+
+    /* Token 4: "from" keyword */
+    tok = strtok_r(NULL, " ", &saveptr);
+    if (!tok) return;
+
+    /* Token 5: source address — "any", "assigned", or "A.B.C.D[/P]" */
+    tok = strtok_r(NULL, " ", &saveptr);
+    if (!tok) return;
+    if (strcmp(tok, "any") == 0) {
+        c->sdf_src_ip   = 0;
+        c->sdf_src_pref = 0;
+    } else if (strcmp(tok, "assigned") == 0) {
+        c->sdf_src_ip   = c->ue_ip;
+        c->sdf_src_pref = c->ue_ip ? 32 : 0;
+    } else {
+        c->sdf_src_ip = phb_parse_ip_prefix(tok, &c->sdf_src_pref);
+    }
+
+    /* Token 6: source port (digit) or "to" keyword */
+    tok = strtok_r(NULL, " ", &saveptr);
+    if (!tok) return;
+    if (strcmp(tok, "to") != 0) {
+        c->sdf_src_port = (uint16_t)atoi(tok);
+        tok = strtok_r(NULL, " ", &saveptr);   /* must be "to" */
+        if (!tok) return;
+    }
+
+    /* Token 7/8: destination address */
+    tok = strtok_r(NULL, " ", &saveptr);
+    if (!tok) return;
+    if (strcmp(tok, "any") == 0) {
+        c->sdf_dst_ip   = 0;
+        c->sdf_dst_pref = 0;
+    } else if (strcmp(tok, "assigned") == 0) {
+        c->sdf_dst_ip   = c->ue_ip;
+        c->sdf_dst_pref = c->ue_ip ? 32 : 0;
+    } else {
+        c->sdf_dst_ip = phb_parse_ip_prefix(tok, &c->sdf_dst_pref);
+    }
+
+    /* Token 9: optional destination port */
+    tok = strtok_r(NULL, " ", &saveptr);
+    if (tok && tok[0] >= '0' && tok[0] <= '9') {
+        c->sdf_dst_port = (uint16_t)atoi(tok);
+    }
+}
+
 /* Add a PDR to the bypass table.
  * Extracts TEID/UE-IP/QFI/SDF from the UPDK_PDR and inserts into
  * the appropriate hash table (teid_tbl for UL, ueip_tbl for DL). */
@@ -173,18 +291,14 @@ phb_add_pdr(phb_table_t *t, const UPDK_PDR *pdr, bool is_uplink)
     if (pdr->flags.pdi && pdr->pdi.flags.qfi)
         cand.qfi = pdr->pdi.qfi;
 
-    /* Extract SDF 5-tuple filter if present */
+    /* Parse SDF flow description into candidate's 5-tuple fields.
+     * The flow description string (e.g. "permit out 17 from 10.60.0.1 5060
+     * to any") is available on the UPDK_PDR at build time.  We parse it
+     * once here so that per-packet phb_match_sdf() is pure register
+     * comparisons (~2-3 ns) with no string work. */
     if (pdr->flags.pdi && pdr->pdi.flags.sdfFilter && pdr->pdi.sdfFilter.flags.fd) {
         cand.has_sdf = 1;
-        /* SDF fields are pre-parsed in the pdr_t by updk_pdr_to_cls_rule.
-         * But we have the raw UPDK_PDR here. We extract what we can from
-         * the precomputed fields on the PDR itself. */
-
-        /* For SDF matching we use the fields from the classifier rule.
-         * Since we also have access to the UPDK_PDR with pre-parsed data,
-         * we mark has_sdf=1 and let the candidate scan match using
-         * the full classifier key vs PDR's flow description.
-         * The actual match is done in phb_match_sdf() below. */
+        phb_parse_flow_description(pdr->pdi.sdfFilter.flowDescription, &cand);
     }
 
     if (is_uplink) {
@@ -228,8 +342,19 @@ phb_find_bucket(const phb_bucket_t *tbl, uint32_t n_buckets, uint32_t key)
     }
 }
 
+/* Prefix-match helper: both ip and cand_ip are in host byte order. */
+static inline bool
+phb_prefix_match(uint32_t pkt_ip, uint32_t cand_ip, uint8_t pref)
+{
+    if (pref == 0)  return true;           /* wildcard — matches all   */
+    if (pref >= 32) return pkt_ip == cand_ip; /* exact host — fast path */
+    uint32_t mask = 0xFFFFFFFFu << (32 - pref);
+    return (pkt_ip & mask) == (cand_ip & mask);
+}
+
 /* Check if a candidate's SDF filter matches the packet.
- * If has_sdf==0, this is a catch-all (matches everything). */
+ * If has_sdf==0, this is a catch-all (matches everything).
+ * All IPs and ports are in host byte order (same as ps_packet_t). */
 static inline bool
 phb_match_sdf(const phb_candidate_t *c, const ps_packet_t *pkt)
 {
@@ -237,16 +362,30 @@ phb_match_sdf(const phb_candidate_t *c, const ps_packet_t *pkt)
     if (!c->has_sdf)
         return true;
 
-    /* QFI check: if candidate specifies QFI, packet must match */
+    /* QFI (0 = wildcard) */
     if (c->qfi != 0 && pkt->qfi != c->qfi)
         return false;
 
-    /* For now, SDF-bearing PDRs always match. The candidate list is
-     * sorted by precedence, so the first SDF-bearing candidate that
-     * matches wins. In a full implementation, you would check the
-     * 5-tuple fields here. Since has_fd PDRs are already differentiated
-     * by precedence and the packet's SDF characteristics, this is
-     * correct for the current deployment with 1-2 SDF filters per UE. */
+    /* Protocol (0 = wildcard, i.e. "ip" in the flow description) */
+    if (c->sdf_proto != 0 && pkt->proto != c->sdf_proto)
+        return false;
+
+    /* Source IP prefix */
+    if (!phb_prefix_match(pkt->src_ip, c->sdf_src_ip, c->sdf_src_pref))
+        return false;
+
+    /* Destination IP prefix */
+    if (!phb_prefix_match(pkt->dst_ip, c->sdf_dst_ip, c->sdf_dst_pref))
+        return false;
+
+    /* Source port (0 = wildcard) */
+    if (c->sdf_src_port != 0 && pkt->src_port != c->sdf_src_port)
+        return false;
+
+    /* Destination port (0 = wildcard) */
+    if (c->sdf_dst_port != 0 && pkt->dst_port != c->sdf_dst_port)
+        return false;
+
     return true;
 }
 
