@@ -50,8 +50,6 @@
 #include "../classifiers/upf_cls_adapter.h"
 #include "../classifiers/classifier_wrapper.h"
 
-#include "pdr_hash_bypass.h"
-
 #include "upf_u_config.h"
 
 #define NF_TAG "upf_u"
@@ -141,7 +139,6 @@ uint32_t trTCMidx = 0;
 
 typedef struct {
     void    *ptr;          // current active snapshot (cls_handle_t*)
-    void    *hash;         // current active hash bypass (phb_table_t*)
     uint32_t ver;          // last applied version
     uint32_t pending_ver;  // version announced by UPF-C via REQ
     uint8_t  flip_pending; // 1 when a flip is requested; cleared after flip
@@ -156,7 +153,6 @@ static inline void UpfClsMaybeFlipAndAck(void) {
 
     // Seqlock read: accept only a stable, even version that doesn't change
     void *new_ptr = NULL;
-    void *new_hash = NULL;
     uint32_t v1, v2;
 
     for (;;) {
@@ -166,9 +162,8 @@ static inline void UpfClsMaybeFlipAndAck(void) {
             continue;
         }
 
-        // Load both pointers after seeing an even version
+        // Load pointer after seeing an even version
         new_ptr  = __atomic_load_n((void * const *)&g_upf_cls_ctrl->active, __ATOMIC_ACQUIRE);
-        new_hash = __atomic_load_n((void * const *)&g_upf_cls_ctrl->hash_bypass, __ATOMIC_ACQUIRE);
 
         // Re-check version; must be the same even number
         v2 = __atomic_load_n(&g_upf_cls_ctrl->version, __ATOMIC_ACQUIRE);
@@ -186,7 +181,6 @@ static inline void UpfClsMaybeFlipAndAck(void) {
 
     // Commit locally & ACK the exact stable version observed
     g_cls_local.ptr  = new_ptr;
-    g_cls_local.hash = new_hash;
     g_cls_local.ver  = v2;
     g_cls_local.flip_pending = 0;
 
@@ -713,21 +707,7 @@ GetPdrByUeIpAddress(struct rte_mbuf *pkt, uint32_t ue_ip)
     key.source_if = SRC_IF_CORE;
     key.is_uplink = false;
 
-    /* ── 2) Try hash bypass first (DL: hash by UE IP) ────────── */
-    const phb_table_t *htbl = (const phb_table_t *)g_cls_local.hash;
-    if (likely(htbl)) {
-        /* ue_ip is already in host byte order (caller did rte_cpu_to_be_32
-         * on a BE value, which on LE is effectively ntohl). Hash table
-         * stores ntohl(s_addr) which is the same encoding. */
-        const UPDK_PDR *hpdr = phb_classify_dl(htbl, ue_ip, &key);
-        if (hpdr) {
-            ConfigureQerFlows(hpdr, false);
-            return (UPDK_PDR *)hpdr;
-        }
-        /* Hash miss → fall through to PartitionSort */
-    }
-
-    /* ── 3) Fallback: PartitionSort classifier ───────────────── */
+    /* ── 2) PartitionSort classifier ────────────────────────── */
     const UPDK_PDR *pdr = UpfClassifyGetPdrPtr(&key);
     if (!pdr) {
         UTLT_Error("Couldn't classify the packet to a PDR");
@@ -783,18 +763,7 @@ UPDK_PDR *GetPdrByTeid(struct rte_mbuf *pkt, const gtp_parse_result_t *gtp_info)
     key.source_if = SRC_IF_ACCESS;
     key.is_uplink = true;
 
-    /* ── Try hash bypass first (UL: hash by TEID) ────────────── */
-    const phb_table_t *htbl = (const phb_table_t *)g_cls_local.hash;
-    if (likely(htbl)) {
-        const UPDK_PDR *hpdr = phb_classify_ul(htbl, key.teid, &key);
-        if (hpdr) {
-            ConfigureQerFlows(hpdr, true);
-            return (UPDK_PDR *)hpdr;
-        }
-        /* Hash miss → fall through to PartitionSort */
-    }
-
-    /* ── Fallback: PartitionSort classifier ──────────────────── */
+    /* ── PartitionSort classifier ──────────────────────────── */
     const UPDK_PDR *pdr = UpfClassifyGetPdrPtr(&key);
     if (!pdr) {
         UTLT_Error("Couldn't classify the packet to a PDR");

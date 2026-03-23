@@ -6,7 +6,6 @@
 
 typedef struct upf_cls_ctrl_s {
     void    *active;     /* current immutable PartitionSort snapshot  */
-    void    *hash_bypass;/* current immutable phb_table_t* (hash bypass) */
     uint32_t version;    /* increasing publish counter                */
 } upf_cls_ctrl_t;
 

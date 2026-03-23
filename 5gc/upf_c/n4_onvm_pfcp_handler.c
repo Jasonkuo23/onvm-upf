@@ -45,8 +45,6 @@
 #include "../classifiers/classifier_wrapper.h"
 #include "../classifiers/upf_cls_adapter.h"
 
-#include "pdr_hash_bypass.h"
-
 
 // for logging
 /* #include <inttypes.h>
@@ -132,29 +130,25 @@ static inline void PdrFreeUpTo(uint32_t ack_ver) {
  * the previously active pointer. If retired_hash_out != NULL, it gets the
  * previously active hash bypass table.
  */
-static inline uint32_t upf_cls_publish(void *new_snap, void *new_hash,
-                                        void **retired_out,
-                                        void **retired_hash_out) {
+static inline uint32_t upf_cls_publish(void *new_snap,
+                                        void **retired_out) {
     /* start = prev + 1 (odd) signals "writer active" */
     uint32_t start = __atomic_load_n(&g_upf_cls_ctrl->version, __ATOMIC_RELAXED) + 1u;
     __atomic_store_n(&g_upf_cls_ctrl->version, start, __ATOMIC_RELEASE);
 
-    /* Swap both pointers (get old for GC) */
+    /* Swap pointer (get old for GC) */
     void *old = __atomic_exchange_n(&g_upf_cls_ctrl->active, new_snap, __ATOMIC_ACQ_REL);
-    void *old_hash = __atomic_exchange_n(&g_upf_cls_ctrl->hash_bypass, new_hash, __ATOMIC_ACQ_REL);
 
     /* publish even version = start + 1 */
     uint32_t stable = start + 1u;
     __atomic_store_n(&g_upf_cls_ctrl->version, stable, __ATOMIC_RELEASE);
 
     if (retired_out) *retired_out = old;
-    if (retired_hash_out) *retired_hash_out = old_hash;
     return stable;
 }
 
 
 static void *g_cls_retired_snapshot = NULL;
-static void *g_cls_retired_hash    = NULL;   /* retired phb_table_t* */
 static uint32_t g_cls_retired_version = 0;
 
 
@@ -274,15 +268,6 @@ bool UpfClsRebuildAndPublish(uint32_t *out_version) {
         return false;
     }
 
-    /* Build hash bypass table alongside the PartitionSort snapshot */
-    phb_table_t *htbl = phb_create();
-    if (!htbl) {
-        UTLT_Error("Hash bypass table create failed");
-        cls_destroy(snap);
-        return false;
-    }
-    uint32_t hash_ul_ok = 0, hash_dl_ok = 0, hash_fail = 0;
-
     list_iterator_t *it = list_iterator_new(g_all_pdr_list, LIST_HEAD);
     for (list_node_t *n; it && (n = list_iterator_next(it)); ) {
         UpfPDR *up = (UpfPDR *)n->val;
@@ -318,30 +303,14 @@ bool UpfClsRebuildAndPublish(uint32_t *out_version) {
             UTLT_Error("cls_insert_rule failed for PDR id=%u", (unsigned)up->pdrId);
             if (it) list_iterator_destroy(it);
             cls_destroy(snap);
-            phb_destroy(htbl);
             return false;
-        }
-
-        /* Also insert into hash bypass table */
-        int hrc = phb_add_pdr(htbl, (const UPDK_PDR *)up, is_uplink);
-        if (hrc == 0) {
-            if (is_uplink) hash_ul_ok++;
-            else           hash_dl_ok++;
-        } else {
-            hash_fail++;
-            UTLT_Debug("Hash bypass: PDR id=%u not hashable (rc=%d)",
-                       (unsigned)up->pdrId, hrc);
         }
     }
     if (it) list_iterator_destroy(it);
 
-    UTLT_Info("Hash bypass: UL=%u DL=%u fail=%u", hash_ul_ok, hash_dl_ok, hash_fail);
-
-    /* Publish both with seqlock; version is even & monotonically increasing */
+    /* Publish with seqlock; version is even & monotonically increasing */
     void    *retired = NULL;
-    void    *retired_hash = NULL;
-    uint32_t ver     = upf_cls_publish((void *)snap, (void *)htbl,
-                                        &retired, &retired_hash);
+    uint32_t ver     = upf_cls_publish((void *)snap, &retired);
 
     /* Cache the retired snapshot only if there was one */
     if (retired) {
@@ -350,11 +319,6 @@ bool UpfClsRebuildAndPublish(uint32_t *out_version) {
         UTLT_Debug("CLS publish: new=%p retired=%p ver=%u", snap, retired, ver);
     } else {
         UTLT_Debug("CLS publish: new=%p retired=<none> ver=%u", snap, ver);
-    }
-
-    /* Cache the retired hash table */
-    if (retired_hash) {
-        __atomic_store_n(&g_cls_retired_hash, retired_hash, __ATOMIC_RELEASE);
     }
 
     /* Notify DP exactly once to flip to this version */
@@ -387,13 +351,6 @@ void UpfClsOnAckFree(uint32_t ver) {
     if (to_free) {
         UTLT_Debug("CLS GC: ACK ver=%u, freeing retired snapshot %p", ver, to_free);
         cls_destroy((cls_handle_t*)to_free);
-    }
-
-    // Also free the retired hash bypass table
-    void *hash_free = __atomic_exchange_n(&g_cls_retired_hash, NULL, __ATOMIC_ACQ_REL);
-    if (hash_free) {
-        UTLT_Debug("CLS GC: freeing retired hash bypass %p", hash_free);
-        phb_destroy((phb_table_t *)hash_free);
     }
 
     // Optional: clear version (release) so duplicate ACKs are cheap no-ops
