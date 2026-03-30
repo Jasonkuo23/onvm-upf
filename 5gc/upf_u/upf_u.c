@@ -76,8 +76,6 @@
 #define MAX_UE 256 // Max number of UEs
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define INLINE_DRAIN_BATCH       8    /* pkts drained per INLINE (FORW)  */
-#define TICK_THRESHOLD          32    /* enqueue count before TICK fires */
-#define TICK_DRAIN_BATCH        32    /* pkts per session per TICK       */
 #define DRAIN_CHUNK             64    /* max pkts dequeued per drain call */
 
 /* mask for 20-bit IPv6 flow label */
@@ -116,8 +114,6 @@ int16_t g_sgi_port    = 0;
 struct rte_meter_trtcm_profile app_trtcm_profile;
 struct rte_meter_trtcm_profile app_flow_trtcm_profile;
 struct rte_meter_trtcm app_flows[APP_FLOWS_MAX];
-
-static uint32_t g_enqueue_counter = 0;
 
 /* trTCM */
 struct rte_meter_trtcm_params app_trtcm_params = {
@@ -1179,7 +1175,6 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
             }
 
             sb->touched = 1;
-            g_enqueue_counter++;
             meta->action = ONVM_NF_ACTION_DROP;
             goto dl_nocp;
         }
