@@ -179,55 +179,6 @@ UpfClassifyGetPdrPtr(const ps_packet_t *key) {
     return (const UPDK_PDR *)descriptor;
 }
 
-/* Extra runtime guard for UL QoS:
- * ensure packet destination still matches SDF "to <ip/prefix>".
- * This protects against false-positive classifier hits. */
-static bool
-UlSdfDstMatch(const UPDK_PDR *pdr, uint32_t dst_ip_host)
-{
-    if (!pdr || !pdr->has_fd || !pdr->pdi.flags.sdfFilter)
-        return true;
-
-    const char *fd = pdr->pdi.sdfFilter.flowDescription;
-    if (!fd || !fd[0])
-        return true;
-
-    const char *to = strstr(fd, "to ");
-    if (!to)
-        return true;
-    to += 3;
-
-    char tok[64] = {0};
-    size_t i = 0;
-    while (to[i] && !isspace((unsigned char)to[i]) && i + 1 < sizeof(tok)) {
-        tok[i] = to[i];
-        i++;
-    }
-    tok[i] = '\0';
-
-    if (tok[0] == '\0' || strcmp(tok, "any") == 0 || strcmp(tok, "assigned") == 0)
-        return true;
-
-    char ip_str[32] = {0};
-    uint32_t pref = 32;
-    char *slash = strchr(tok, '/');
-    if (slash) {
-        *slash = '\0';
-        pref = (uint32_t)atoi(slash + 1);
-        if (pref > 32) pref = 32;
-    }
-    snprintf(ip_str, sizeof(ip_str), "%s", tok);
-
-    struct in_addr addr;
-    if (inet_pton(AF_INET, ip_str, &addr) != 1)
-        return true;
-
-    uint32_t rule_ip_host = rte_be_to_cpu_32(addr.s_addr);
-    // Mask off host bits and compare
-    uint32_t mask = (pref == 0) ? 0u : (0xFFFFFFFFu << (32 - pref));
-    return ((dst_ip_host & mask) == (rule_ip_host & mask));
-}
-
 UPDK_PDR *
 GetPdrByUeIpAddress(struct rte_mbuf *pkt, uint32_t ue_ip)
 {
@@ -810,8 +761,8 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
              * and per-flow QER contains MBR/GBR. For UDP tests, you must check
              * server-side throughput/loss or use TCP to observe the cap. */
             if (pdr && pdr->has_fd && pdr->qer && pdr->qer->flags.maximumBitrate) {
-                uint32_t dn_server_ip_host = rte_be_to_cpu_32(dn_server_ip_be);
-                if (UlSdfDstMatch(pdr, dn_server_ip_host)) {
+                uint32_t dst_ip_host = rte_be_to_cpu_32(dn_server_ip_be);
+                if (!pdr->has_fd_to || (dst_ip_host & pdr->fd_to_mask) == pdr->fd_to_net) {
                     int ft_idx = ftSearch(pdr->meter_key);
                     if (unlikely(ft_idx < 0 || ft_idx >= (int)APP_FLOWS_MAX)) {
                         UTLT_Warning("UL QoS: no trTCM flow for meter_key=%u (ft_idx=%d) pdr=%u seid=%lu; dropping",
