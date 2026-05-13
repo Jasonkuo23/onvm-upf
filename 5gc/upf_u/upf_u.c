@@ -675,8 +675,17 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
                 isQos = true;
                 trtcm_profile = &app_flow_trtcm_profile;
                 int ft_idx = ftSearch(pdr->meter_key);
+                if (unlikely(ft_idx < 0 || ft_idx >= (int)APP_FLOWS_MAX)) {
+                    UTLT_Warning("DL QoS: no trTCM flow for meter_key=%u (ft_idx=%d) pdr=%u seid=%lu; dropping",
+                                 pdr->meter_key, ft_idx, pdr->pdrId, seid);
+                    meta->flags = RTE_COLOR_RED;
+                    meta->action = ONVM_NF_ACTION_DROP;
+                    goto dl_nocp;
+                }
                 color_result = trtcmColorHandle(cal_pktlen, curr_time,
                                                 ft_idx, trtcm_profile);
+                // set the meta action to out for now, and trtcmPolicer will update it to drop if color is red
+                meta->action = ONVM_NF_ACTION_OUT;
                 if (trtcmPolicer(meta, color_result) > 0)
                     UTLT_Error("trTCM Policer error");
             }
@@ -747,6 +756,32 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
             /* Get the DN server IP address */
             uint32_t dn_server_ip_be = inner_iph->dst_addr;
             UTLT_Trace("DN server IP: %s\n", convertToIpAddressString(dn_server_ip_be));
+
+            /* UL QoS policing (flow-level): applies when CP provided SDF (has_fd)
+             * and per-flow QER contains MBR/GBR. For UDP tests, you must check
+             * server-side throughput/loss or use TCP to observe the cap. */
+            if (pdr && pdr->has_fd && pdr->qer && pdr->qer->flags.maximumBitrate) {
+                uint32_t dst_ip_host = rte_be_to_cpu_32(dn_server_ip_be);
+                if (!pdr->has_fd_to || (dst_ip_host & pdr->fd_to_mask) == pdr->fd_to_net) {
+                    int ft_idx = ftSearch(pdr->meter_key);
+                    if (unlikely(ft_idx < 0 || ft_idx >= (int)APP_FLOWS_MAX)) {
+                        UTLT_Warning("UL QoS: no trTCM flow for meter_key=%u (ft_idx=%d) pdr=%u seid=%lu; dropping",
+                                    pdr->meter_key, ft_idx, pdr->pdrId, seid);
+                        meta->flags = RTE_COLOR_RED;
+                        meta->action = ONVM_NF_ACTION_DROP;
+                        return 0;
+                    }
+
+                    uint64_t curr_time = rte_get_tsc_cycles();
+                    int color_result = trtcmColorHandle(pkt->pkt_len, curr_time,
+                                                        ft_idx, &app_flow_trtcm_profile);
+                    if (trtcmPolicer(meta, color_result) > 0)
+                        UTLT_Error("UL trTCM Policer error");
+
+                    if (meta->action == ONVM_NF_ACTION_DROP)
+                        return 0;
+                }
+            }
 
             /* Attach L2 (or ARP) header for the N6-bound packet */
             if (attach_l2_or_arp(pkt, g_n6_port, g_n6_ip_be, dn_server_ip_be,

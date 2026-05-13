@@ -103,7 +103,7 @@ trtcmPolicer(struct onvm_pkt_meta *meta, int color_result) {
         case RTE_COLOR_YELLOW:
             UTLT_Info("\033[0;32mYELLOW(%d)\033[0m, best effort pkt fwd", RTE_COLOR_YELLOW);
             meta->flags = RTE_COLOR_YELLOW;
-            meta->action = ONVM_NF_ACTION_DROP;
+	        meta->action = ONVM_NF_ACTION_OUT;
             break;
         case RTE_COLOR_GREEN:
             UTLT_Info("\033[0;33mGREEEN(%d)\033[0m, guaranted pkt fwd.", RTE_COLOR_GREEN);
@@ -253,7 +253,7 @@ ConfigureQerFlows(const UPDK_PDR *pdr, bool is_uplink) {
         uint32_t gbr = is_uplink ? qer->guaranteedBitrate.ul : qer->guaranteedBitrate.dl;
         trtcm_params.cir = gbr * 1000 / 8;
     } else {
-        trtcm_params.cir = is_uplink ? 0 : 1;
+        trtcm_params.cir = 1;
     }
 
     if (!ftAddEntry(key, trTCMidx)) {
@@ -262,8 +262,8 @@ ConfigureQerFlows(const UPDK_PDR *pdr, bool is_uplink) {
     UTLT_Info("Successfully add %u(%d) %u", key, hashFunc(key), trTCMidx);
 
     // Match config profile to what color-check later uses:
-    // DL + SDF present → app_flow_trtcm_profile; else app_trtcm_profile
-    if (!is_uplink && has_fd) {
+    // SDF present (has_fd) → app_flow_trtcm_profile; else app_trtcm_profile
+    if (has_fd) {
         rte_meter_trtcm_profile_config(&app_flow_trtcm_profile, &trtcm_params);
         rte_meter_trtcm_config(&app_flows[trTCMidx], &app_flow_trtcm_profile);
     } else {
