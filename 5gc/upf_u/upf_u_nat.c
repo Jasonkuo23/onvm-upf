@@ -21,6 +21,7 @@
 #include <time.h>
 
 #include <rte_common.h>
+#include <rte_cksum.h>
 #include <rte_icmp.h>
 #include <rte_ip.h>
 #include <rte_tcp.h>
@@ -163,17 +164,7 @@ nat_set_dst_port(struct rte_ipv4_hdr *iph, uint16_t port)
 static uint16_t
 nat_raw_checksum(const void *buf, size_t len)
 {
-    const uint16_t *data = (const uint16_t *)buf;
-    uint32_t sum = 0;
-
-    while (len > 1) {
-        sum += *data++;
-        len -= 2;
-    }
-
-    if (len == 1) {
-        sum += *((const uint8_t *)data);
-    }
+    uint32_t sum = rte_raw_cksum(buf, len);
 
     while (sum >> 16) {
         sum = (sum & 0xFFFFu) + (sum >> 16);

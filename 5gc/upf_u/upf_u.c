@@ -932,9 +932,7 @@ main(int argc, char *argv[]) {
 
     /* NAT module init (only if enabled in config) */
     if (g_nat_enabled) {
-        if (nat_init() < 0) {
-            rte_exit(EXIT_FAILURE, "failed to init NAT module\n");
-        }
+        nat_init();
     }
 
     onvm_nflib_run(nf_local_ctx);

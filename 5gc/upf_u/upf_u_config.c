@@ -254,7 +254,7 @@ do_parse(yaml_document_t *doc) {
         yaml_node_t *enabled = map_get(doc, nat, "enable");
         const char *enable_str = scalar_str(enabled);
         if (enable_str) {
-            if (strcmp(enable_str, "true") == 0) {
+            if (strcmp(enable_str, "true") == 0 || strcmp(enable_str, "1") == 0) {
                 g_nat_enabled = 1;
             } else {
                 g_nat_enabled = 0;
