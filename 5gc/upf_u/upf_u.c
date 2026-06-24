@@ -18,13 +18,11 @@
 
 #include <errno.h>
 #include <getopt.h>
-#include <inttypes.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/queue.h>
 #include <unistd.h>
 #include <stdbool.h>
 
@@ -34,6 +32,9 @@
 #include <rte_ether.h>
 #include <rte_mbuf.h>
 #include <rte_meter.h>
+#include <rte_malloc.h>
+#include <rte_ring.h>
+#include <rte_tcp.h>
 
 #include "gtp.h"
 #include "upf_context.h"
@@ -55,6 +56,7 @@
 #include "upf_u_arp.h"
 #include "upf_u_icmp.h"
 #include "upf_u_nat.h"
+#include "upf_u_shaper.h"
 #include "upf_u_trtcm.h"
 
 #define NF_TAG "upf_u"
@@ -524,6 +526,9 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
     UPDK_PDR *pdr = NULL;
     gtp_parse_result_t gtp_info = {0};
     int ue_idx = -1;
+    UpfSession *owner_session = NULL;
+    uint32_t ue_key = 0;
+    struct upf_u_shaper_flow_key dl_flow_key = {0};
 
     /* char *src_address = convertToIpAddressString(iph->src_addr);
     UTLT_Info("Src IP is %s\n", src_address);
@@ -576,10 +581,16 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
     UTLT_Info("Got PDR ID is %u\n", pdr->pdrId);
 
     if (is_dl) {
-        uint32_t ue_key = rte_cpu_to_be_32(iph->dst_addr);
+        ue_key = rte_cpu_to_be_32(iph->dst_addr);
         ue_idx = findIndexByUeIpAddress(ue_key);
         if (ue_idx < 0) {
             ue_idx = GetQerByUEIpAddressFromPdr(ue_key, pdr, convertToIpAddressString(iph->dst_addr));
+        }
+        if (!upf_u_shaper_build_dl_flow_key(pkt, pdr, ue_key, pdr->has_fd,
+                                            &dl_flow_key)) {
+            UTLT_Error("Failed to build DL shaper flow key");
+            meta->action = ONVM_NF_ACTION_DROP;
+            return 0;
         }
     }
 
@@ -676,7 +687,9 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
             goto dl_nocp;
         }
 
-        /* QoS policing — FORW only */
+        /* QoS shaping — FORW only, after GTP-U/L2 TX prep is complete.
+         * Over-token packets wait in bounded per-flow FIFOs; only red,
+         * invalid, or queue-overflow packets drop. */
         if (far_action == UPDK_FAR_APPLY_ACTION_FORW) {
             if (ue_idx < 0) {
                 UTLT_Error("No UE IP found in the table");
@@ -710,25 +723,29 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
 
             if (isQos) {
                 if (meta->flags == RTE_COLOR_RED) {
-                    meta->action = ONVM_NF_ACTION_DROP;
+                    upf_u_shaper_drop_red(meta);
                     goto dl_nocp;
                 }
-                if (meta->flags == RTE_COLOR_GREEN) {
-                    ue_table[ue_idx].ue_qos_tb_params.tb_tokens -= cal_pktlen;
-                }
-                if (meta->flags == RTE_COLOR_YELLOW) {
-                    while (ue_table[ue_idx].ue_qos_tb_params.tb_tokens < cal_pktlen) {
-                        updateTokenbyIndex(ue_idx);
-                        usleep(1);
-                    }
-                    ue_table[ue_idx].ue_qos_tb_params.tb_tokens -= cal_pktlen;
+                if (meta->flags == RTE_COLOR_GREEN ||
+                    meta->flags == RTE_COLOR_YELLOW) {
+                    enum upf_u_shaper_pkt_color color =
+                        (meta->flags == RTE_COLOR_GREEN) ?
+                        UPF_U_SHAPER_COLOR_GREEN :
+                        UPF_U_SHAPER_COLOR_YELLOW;
+                    enum upf_u_shaper_decision decision =
+                        upf_u_shaper_shape_or_enqueue(
+                            ue_idx, &dl_flow_key, true, color, pkt,
+                            cal_pktlen, meta);
+                    if (decision != UPF_U_SHAPER_PASS)
+                        goto dl_nocp;
                 }
             } else {
-                while (ue_table[ue_idx].ue_nqos_tb_params.tb_tokens < cal_pktlen) {
-                    updateTokenbyIndex(ue_idx);
-                    usleep(1);
-                }
-                ue_table[ue_idx].ue_nqos_tb_params.tb_tokens -= cal_pktlen;
+                enum upf_u_shaper_decision decision =
+                    upf_u_shaper_shape_or_enqueue(
+                        ue_idx, &dl_flow_key, false,
+                        UPF_U_SHAPER_COLOR_NQOS, pkt, cal_pktlen, meta);
+                if (decision != UPF_U_SHAPER_PASS)
+                    goto dl_nocp;
             }
         }
 
@@ -869,6 +886,27 @@ msg_handler(void *msg_data, struct onvm_nf_local_ctx *nf_local_ctx) {
     if (e) rte_free(e);
 }
 
+static uint64_t last_p = 0;
+
+static int
+callback_handler(struct onvm_nf_local_ctx *nf_local_ctx) {
+    if (unlikely(!last_p)) last_p = rte_get_tsc_cycles();
+    uint64_t cur_p = rte_get_tsc_cycles();
+    struct onvm_nf *nf = nf_local_ctx->nf;
+
+    upf_u_shaper_drain(nf);
+
+    if (unlikely(cur_p - last_p > rte_get_timer_hz())) {
+        last_p = cur_p;
+        UTLT_Debug("Stats perform: ");
+        UTLT_Debug("act out: %d", nf->stats.act_out);
+        UTLT_Debug("buffered: %d", nf->stats.tx_buffer);
+        upf_u_shaper_log_stats();
+    }
+
+    return 0;
+}
+
 int
 main(int argc, char *argv[]) {
     int arg_offset;
@@ -881,6 +919,7 @@ main(int argc, char *argv[]) {
     nf_function_table = onvm_nflib_init_nf_function_table();
     nf_function_table->pkt_handler = &packet_handler;
     nf_function_table->msg_handler = &msg_handler;
+    nf_function_table->user_actions = &callback_handler;
 
     if ((arg_offset = onvm_nflib_init(argc, argv, NF_TAG, nf_local_ctx, nf_function_table)) < 0) {
         onvm_nflib_stop(nf_local_ctx);
@@ -940,8 +979,13 @@ main(int argc, char *argv[]) {
         nat_init();
     }
 
+    if (upf_u_shaper_init(nf_local_ctx->nf) < 0) {
+        rte_exit(EXIT_FAILURE, "Failed to init UPF-U shaper entry pool.\n");
+    }
+
     onvm_nflib_run(nf_local_ctx);
 
+    upf_u_shaper_cleanup();
     onvm_nflib_stop(nf_local_ctx);
     return 0;
 }
