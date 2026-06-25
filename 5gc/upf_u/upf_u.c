@@ -68,17 +68,6 @@
 uint64_t seid = 0;
 uint16_t pdrId = 0;
 
-static inline int
-UpfSendEvt1(uint16_t dest_sid, uint32_t type, uintptr_t a0) {
-    Event *e = (Event *)rte_calloc("upf_evt", 1, sizeof(*e), 0);
-    if (!e) return -1;
-    e->type = (uintptr_t)type;
-    e->argc = 1;
-    e->arg0 = a0;
-    int rc = onvm_nflib_send_msg_to_nf(dest_sid, e);
-    if (rc < 0) rte_free(e);
-    return rc;
-}
 
 typedef struct {
     void    *ptr;          // current active snapshot (cls_handle_t*)
