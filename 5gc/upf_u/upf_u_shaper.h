@@ -80,6 +80,9 @@ upf_u_shaper_drop_red(struct onvm_pkt_meta *meta);
 uint32_t
 upf_u_shaper_drain(struct onvm_nf *nf);
 
+uint32_t
+upf_u_shaper_drain_inline(struct onvm_nf *nf);
+
 void
 upf_u_shaper_log_stats(void);
 
