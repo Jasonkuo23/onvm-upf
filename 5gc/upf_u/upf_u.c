@@ -643,9 +643,14 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
                 Encap(pkt, far, pdr->qer);
         }
 
+        uint32_t gnb_n3_ip_be = g_nat_enabled 
+            ? g_an_peer_n3_ip_be
+            : far->forwardingParameters.outerHeaderCreation.ipv4.s_addr;
+        UTLT_Trace("gNB N3 IP: %s\n", convertToIpAddressString(gnb_n3_ip_be));
+
         // Regardless of BUFF vs FORW, we need to attach L2 (or ARP) header
         // before sending to N3 port.
-        if (attach_l2_or_arp(pkt, g_n3_port, g_n3_ip_be, g_an_peer_n3_ip_be,
+        if (attach_l2_or_arp(pkt, g_n3_port, g_n3_ip_be, gnb_n3_ip_be,
                             nf_local_ctx->nf) < 0) {
             meta->action = ONVM_NF_ACTION_DROP;   /* or buffer */
             return 0;
@@ -815,9 +820,9 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
             }
 
             /* Attach L2 (or ARP) header for the N6-bound packet */
-            uint32_t n6_next_hop_ip_be = g_dn_peer_n6_ip_be ? g_dn_peer_n6_ip_be : dn_server_ip_be;
-            UTLT_Trace("N6 next hop IP: %s", convertToIpAddressString(n6_next_hop_ip_be));
-            if (attach_l2_or_arp(pkt, g_n6_port, g_n6_ip_be, n6_next_hop_ip_be,
+            dn_server_ip_be = g_nat_enabled ? g_dn_peer_n6_ip_be : dn_server_ip_be;
+
+            if (attach_l2_or_arp(pkt, g_n6_port, g_n6_ip_be, dn_server_ip_be,
                                 nf_local_ctx->nf) < 0) {
                 meta->action = ONVM_NF_ACTION_DROP;
                 return 0;

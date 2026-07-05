@@ -25,14 +25,14 @@
 
 extern uint32_t g_n3_ip_be;     // UPF local IP on the access-facing port
 extern uint32_t g_n6_ip_be;     // UPF local IP on the core/SGi-facing port
-extern uint32_t g_an_peer_n3_ip_be;  // Next-hop IP of the AN/gNB peer
-extern uint32_t g_dn_peer_n6_ip_be;  // Next-hop IP of the DN/upstream router peer
 
 extern uint16_t  g_n3_port;      // UPF-U DPDK port connected to the access side (AN/gNB)
 extern uint16_t  g_n6_port;      // UPF-U DPDK port connected to the core side (SGi)
 extern uint16_t  g_sgi_port;     // UPF-U DPDK port connected to the SGi side
 
 extern uint8_t  g_nat_enabled;       // Enable dynamic IPv4 NAT on N6
+extern uint32_t g_an_peer_n3_ip_be;  // Next-hop IP of the AN/gNB peer
+extern uint32_t g_dn_peer_n6_ip_be;  // Next-hop IP of the DN/upstream router peer
 extern uint32_t g_nat_public_ip_be;  // Public IPv4 used for SNAT/DNAT on N6
 extern uint16_t g_nat_port_min;      // Inclusive start of dynamic NAT port pool
 extern uint16_t g_nat_port_max;      // Inclusive end of dynamic NAT port pool
