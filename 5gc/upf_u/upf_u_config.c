@@ -33,7 +33,14 @@ uint16_t g_n6_port   = 0;
 uint16_t g_sgi_port    = 0;
 
 uint32_t g_n3_ip_be = 0;
-uint32_t g_n6_ip_be   = 0;
+uint32_t g_n6_ip_be = 0;
+
+uint8_t g_nat_enabled = 0;
+uint32_t g_an_peer_n3_ip_be = 0;
+uint32_t g_dn_peer_n6_ip_be = 0;
+uint32_t g_nat_public_ip_be = 0;
+uint16_t g_nat_port_min = 10000;
+uint16_t g_nat_port_max = 60000;
 
 char g_log_level[16] = "warning";
 
@@ -196,6 +203,109 @@ do_parse(yaml_document_t *doc) {
             if (v < 0 || v > 255) { fprintf(stderr, "[UPF-U][CONFIG] bad ports.n6_port\n"); return -1; }
             g_n6_port = (uint16_t)v;
             g_sgi_port  = (uint16_t)v;
+        }
+    }
+
+    yaml_node_t *nat = map_get(doc, cfg, "nat");
+
+    if (nat && nat->type == YAML_MAPPING_NODE) {
+        yaml_node_t *enabled = map_get(doc, nat, "enable");
+        const char *enable_str = scalar_str(enabled);
+        if (enable_str) {
+            if (strcmp(enable_str, "true") == 0 || strcmp(enable_str, "1") == 0) {
+                g_nat_enabled = 1;
+            } else {
+                g_nat_enabled = 0;
+            }
+        }
+
+        if (g_nat_enabled) {
+            // an_peer_n3_ip
+            {
+                yaml_node_t *n = map_get(doc, nat, "an_peer_n3_ip");
+                if (!n || n->type != YAML_SCALAR_NODE) {
+                    fprintf(stderr, "[UPF-U][CONFIG] missing an_peer_n3_ip\n");
+                    return -1;
+                }
+                const unsigned char *p = n->data.scalar.value;
+                size_t len = n->data.scalar.length;
+
+                char buf[64];
+                if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+                memcpy(buf, p, len);
+                buf[len] = '\0';
+
+                if (parse_ipv4_address(buf, &g_an_peer_n3_ip_be) != 0) {
+                    fprintf(stderr, "[UPF-U][CONFIG] invalid an_peer_n3_ip\n");
+                    return -1;
+                }
+            }
+
+            // dn_peer_n6_ip
+            {
+                yaml_node_t *n = map_get(doc, nat, "dn_peer_n6_ip");
+                if (!n || n->type != YAML_SCALAR_NODE) {
+                    fprintf(stderr, "[UPF-U][CONFIG] missing dn_peer_n6_ip\n");
+                    return -1;
+                }
+                const unsigned char *p = n->data.scalar.value;
+                size_t len = n->data.scalar.length;
+
+                char buf[64];
+                if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+                memcpy(buf, p, len);
+                buf[len] = '\0';
+
+                if (parse_ipv4_address(buf, &g_dn_peer_n6_ip_be) != 0) {
+                    fprintf(stderr, "[UPF-U][CONFIG] invalid dn_peer_n6_ip\n");
+                    return -1;
+                }
+            }
+
+            {
+                yaml_node_t *n = map_get(doc, nat, "public_ip");
+                const char *s = scalar_str(n);
+                if (s && *s) {
+                    if (parse_ipv4_address(s, &g_nat_public_ip_be) != 0) {
+                        fprintf(stderr, "[UPF-U][CONFIG] invalid nat.public_ip\n");
+                        return -1;
+                    }
+                }
+            }
+
+            {
+                yaml_node_t *n = map_get(doc, nat, "port_min");
+                const char *s = scalar_str(n);
+                if (s && *s) {
+                    int v = atoi(s);
+                    if (v < 1 || v > 65535) {
+                        fprintf(stderr, "[UPF-U][CONFIG] bad nat.port_min\n");
+                        return -1;
+                    }
+                    g_nat_port_min = (uint16_t)v;
+                }
+            }
+
+            {
+                yaml_node_t *n = map_get(doc, nat, "port_max");
+                const char *s = scalar_str(n);
+                if (s && *s) {
+                    int v = atoi(s);
+                    if (v < 1 || v > 65535) {
+                        fprintf(stderr, "[UPF-U][CONFIG] bad nat.port_max\n");
+                        return -1;
+                    }
+                    g_nat_port_max = (uint16_t)v;
+                }
+            }
+            if (!g_nat_public_ip_be) {
+                fprintf(stderr, "[UPF-U][CONFIG] nat.enable requires nat.public_ip\n");
+                return -1;
+            }
+            if (g_nat_port_min > g_nat_port_max) {
+                fprintf(stderr, "[UPF-U][CONFIG] nat.port_min must be <= nat.port_max\n");
+                return -1;
+            }
         }
     }
 

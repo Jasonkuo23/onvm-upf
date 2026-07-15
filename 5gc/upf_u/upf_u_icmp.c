@@ -90,6 +90,12 @@ handle_local_icmp_echo(struct rte_mbuf *pkt,
     if (!upf_is_local_ipv4(iph->dst_addr))
         return 0;
 
+    /* NAT public-IP traffic on N6 must stay in the UPF datapath (DNAT),
+     * not be consumed by local ICMP handling. */
+    if (g_nat_enabled && pkt->port == g_n6_port &&
+        iph->dst_addr == g_nat_public_ip_be)
+        return 0;
+
     ip_hdr_len = (uint16_t)((iph->version_ihl & 0x0f) * 4);
     if (unlikely(ip_hdr_len < sizeof(struct rte_ipv4_hdr))) {
         meta->action = ONVM_NF_ACTION_DROP;

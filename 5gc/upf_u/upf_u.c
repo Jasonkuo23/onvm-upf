@@ -25,7 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/queue.h>
-#include <time.h>
 #include <unistd.h>
 #include <stdbool.h>
 
@@ -55,6 +54,7 @@
 #include "upf_u_config.h"
 #include "upf_u_arp.h"
 #include "upf_u_icmp.h"
+#include "upf_u_nat.h"
 #include "upf_u_trtcm.h"
 
 #define NF_TAG "upf_u"
@@ -128,7 +128,6 @@ UpfClsMaybeFlipAndAck(void) {
 
     (void)UpfSendEvt1(UPF_C_SERVICE_ID, EVT_CLS_GC_ACK, (uintptr_t)v2);
 }
-
 
 /* static inline const UPDK_PDR *
 UpfLookupPdr(const ps_packet_t *key) {
@@ -545,7 +544,26 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
         pdr = GetPdrByTeid(pkt, &gtp_info);
 
     } else {
-        // UTLT_Info("It is downlink, dst is %s\n", convertToIpAddressString(iph->dst_addr));
+        UTLT_Trace("DL ingress: port=%u dst=%s proto=%u",
+                   pkt->port,
+                   convertToIpAddressString(iph->dst_addr),
+                   iph->next_proto_id);
+
+        if (pkt->port == g_n6_port && g_nat_enabled) {
+            int dnat_rc = nat_apply_dnat(iph);
+            UTLT_Trace("DL NAT: rc=%d post-dnat dst=%s proto=%u",
+                       dnat_rc,
+                       convertToIpAddressString(iph->dst_addr),
+                       iph->next_proto_id);
+            if (dnat_rc < 0 && iph->dst_addr == g_nat_public_ip_be) {
+                UTLT_Warning("NAT DNAT miss for public packet %s:%u",
+                             convertToIpAddressString(iph->dst_addr),
+                             nat_dst_port(iph));
+                meta->action = ONVM_NF_ACTION_DROP;
+                return 0;
+            }
+        }
+
         pdr = GetPdrByUeIpAddress(pkt, rte_cpu_to_be_32(iph->dst_addr));
         is_dl = true;
     }
@@ -625,9 +643,9 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
                 Encap(pkt, far, pdr->qer);
         }
 
-        /* Get the gNB N3 IP address */
-        uint32_t gnb_n3_ip_be =
-            far->forwardingParameters.outerHeaderCreation.ipv4.s_addr;
+        uint32_t gnb_n3_ip_be = g_nat_enabled 
+            ? g_an_peer_n3_ip_be
+            : far->forwardingParameters.outerHeaderCreation.ipv4.s_addr;
         UTLT_Trace("gNB N3 IP: %s\n", convertToIpAddressString(gnb_n3_ip_be));
 
         // Regardless of BUFF vs FORW, we need to attach L2 (or ARP) header
@@ -752,6 +770,24 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
             return 0;
         }
 
+        if (g_nat_enabled && meta->action == ONVM_NF_ACTION_OUT) {
+            char src_buf[16];
+            char dst_buf[16];
+            UTLT_Trace("UL ingress: port=%u src=%s dst=%s proto=%u",
+                       pkt->port,
+                       ipv4_to_buf(inner_iph->src_addr, src_buf),
+                       ipv4_to_buf(inner_iph->dst_addr, dst_buf),
+                       inner_iph->next_proto_id);
+            if (nat_apply_snat(inner_iph) < 0) {
+                meta->action = ONVM_NF_ACTION_DROP;
+                return 0;
+            }
+            UTLT_Trace("UL NAT: post-snat src=%s dst=%s proto=%u",
+                       ipv4_to_buf(inner_iph->src_addr, src_buf),
+                       ipv4_to_buf(inner_iph->dst_addr, dst_buf),
+                       inner_iph->next_proto_id);
+        }
+
         if (meta->action == ONVM_NF_ACTION_OUT) {
             /* Get the DN server IP address */
             uint32_t dn_server_ip_be = inner_iph->dst_addr;
@@ -784,6 +820,8 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
             }
 
             /* Attach L2 (or ARP) header for the N6-bound packet */
+            dn_server_ip_be = g_nat_enabled ? g_dn_peer_n6_ip_be : dn_server_ip_be;
+
             if (attach_l2_or_arp(pkt, g_n6_port, g_n6_ip_be, dn_server_ip_be,
                                 nf_local_ctx->nf) < 0) {
                 meta->action = ONVM_NF_ACTION_DROP;
@@ -895,6 +933,11 @@ main(int argc, char *argv[]) {
     /* ARP module init */
     if (upf_arp_init() < 0) {
         rte_exit(EXIT_FAILURE, "failed to init ARP module\n");
+    }
+
+    /* NAT module init (only if enabled in config) */
+    if (g_nat_enabled) {
+        nat_init();
     }
 
     onvm_nflib_run(nf_local_ctx);
