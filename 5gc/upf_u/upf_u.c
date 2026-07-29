@@ -545,8 +545,6 @@ drain_session_batch(int sess_idx, uint32_t max_pkts, struct onvm_nf *nf) {
 
 static int
 packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_local_ctx *nf_local_ctx) {
-    if (nf_local_ctx != NULL && nf_local_ctx->nf != NULL)
-        upf_u_shaper_drain_inline(nf_local_ctx->nf);
     if (pkt == NULL || meta == NULL) {
         return 0;
     }
