@@ -44,12 +44,12 @@
 #include "upf_u_trtcm.h"
 
 #define SHAPER_SCAN_BUDGET       32
-#define SHAPER_DRAIN_BUDGET      64
-#define SHAPER_CLASS_BURST        8
-#define SHAPER_DRAIN_CHUNK       64
+#define SHAPER_DRAIN_BUDGET      128
+#define SHAPER_CLASS_BURST        16
+#define SHAPER_DRAIN_CHUNK       128
 #define SHAPER_MAX_FLOWS_PER_UE  64
-#define SHAPER_MAX_PKTS_PER_FLOW 256
-#define SHAPER_MAX_PKTS_PER_UE   1024
+#define SHAPER_MAX_PKTS_PER_FLOW 512
+#define SHAPER_MAX_PKTS_PER_UE   2048
 #define SHAPER_ENTRY_POOL_CACHE  256
 #define SHAPER_UE_BITMAP_WORDS   ((MAX_UE + 63) / 64)
 
@@ -807,6 +807,65 @@ upf_u_shaper_build_dl_flow_key(struct rte_mbuf *pkt, const UPDK_PDR *pdr,
         key->dst_port = rte_be_to_cpu_16(th->dst_port);
     }
 
+    return true;
+}
+
+bool
+upf_u_shaper_dl_packet_len(struct rte_mbuf *pkt,
+                           const struct rte_ipv4_hdr *iph,
+                           uint32_t *metered_len) {
+    uint16_t ip_total_len;
+    uint16_t ip_hdr_len;
+    uint16_t l4_payload_len;
+    uint16_t l4_off;
+    uint32_t pkt_len;
+
+    if (metered_len != NULL)
+        *metered_len = 0;
+    if (pkt == NULL || iph == NULL || metered_len == NULL)
+        return false;
+
+    ip_hdr_len = (uint16_t)((iph->version_ihl & 0x0f) * 4);
+    ip_total_len = rte_be_to_cpu_16(iph->total_length);
+    pkt_len = rte_pktmbuf_pkt_len(pkt);
+
+    if (ip_hdr_len < sizeof(struct rte_ipv4_hdr) ||
+        ip_total_len < ip_hdr_len ||
+        pkt_len < sizeof(struct rte_ether_hdr) + ip_total_len)
+        return false;
+
+    l4_payload_len = ip_total_len - ip_hdr_len;
+    l4_off = sizeof(struct rte_ether_hdr) + ip_hdr_len;
+
+    if (iph->next_proto_id == IPPROTO_UDP) {
+        if (l4_payload_len < sizeof(struct rte_udp_hdr))
+            return false;
+        *metered_len = l4_payload_len - sizeof(struct rte_udp_hdr);
+        return true;
+    }
+
+    if (iph->next_proto_id == IPPROTO_TCP) {
+        struct rte_tcp_hdr tcp_hdr;
+        const struct rte_tcp_hdr *th;
+        uint16_t tcp_hdr_len;
+
+        if (l4_payload_len < sizeof(struct rte_tcp_hdr))
+            return false;
+
+        th = rte_pktmbuf_read(pkt, l4_off, sizeof(tcp_hdr), &tcp_hdr);
+        if (th == NULL)
+            return false;
+
+        tcp_hdr_len = (uint16_t)((th->data_off >> 4) * 4);
+        if (tcp_hdr_len < sizeof(struct rte_tcp_hdr) ||
+            tcp_hdr_len > l4_payload_len)
+            return false;
+
+        *metered_len = l4_payload_len - tcp_hdr_len;
+        return true;
+    }
+
+    *metered_len = l4_payload_len;
     return true;
 }
 

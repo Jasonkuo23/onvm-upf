@@ -63,22 +63,11 @@
 
 /* Used for buffering */
 #define INLINE_DRAIN_BATCH       8    /* pkts drained per INLINE (FORW)  */
-#define DRAIN_CHUNK             64    /* max pkts dequeued per drain call */
+#define DRAIN_CHUNK             128   /* max pkts dequeued per drain call */
 
 uint64_t seid = 0;
 uint16_t pdrId = 0;
 
-static inline int
-UpfSendEvt1(uint16_t dest_sid, uint32_t type, uintptr_t a0) {
-    Event *e = (Event *)rte_calloc("upf_evt", 1, sizeof(*e), 0);
-    if (!e) return -1;
-    e->type = (uintptr_t)type;
-    e->argc = 1;
-    e->arg0 = a0;
-    int rc = onvm_nflib_send_msg_to_nf(dest_sid, e);
-    if (rc < 0) rte_free(e);
-    return rc;
-}
 
 typedef struct {
     void    *ptr;          // current active snapshot (cls_handle_t*)
@@ -178,6 +167,11 @@ UpfClassifyGetPdrPtr(const ps_packet_t *key) {
     int hit = cls_classify_packet((cls_handle_t *)snap, key, &precedence, &descriptor);
     if (hit != 1 || descriptor == 0) return NULL;
     return (const UPDK_PDR *)descriptor;
+}
+
+static inline uint64_t
+saturating_add_u64(uint64_t lhs, uint64_t rhs) {
+    return UINT64_MAX - lhs < rhs ? UINT64_MAX : lhs + rhs;
 }
 
 UPDK_PDR *
@@ -283,11 +277,86 @@ GetPdrByTeid(struct rte_mbuf *pkt, const gtp_parse_result_t *gtp_info) {
     return pdr;
 }
 
-/* Populate UE table using the already-classified UPDK_PDR (no session/pdr_list scan)*/
-static inline int
-GetQerByUEIpAddressFromPdr(uint32_t ue_ip, const UPDK_PDR *pdr, const char *ip_str)
+static inline void
+AccumulateQerDlRates(const UPDK_QER *q, uint64_t *ambr64,
+                     uint64_t *gbr64, uint64_t *mbr64,
+                     bool *has_gbr_qer)
 {
-    if (!pdr || pdr->qer_count == 0) {
+    if (!q || !q->flags.maximumBitrate)
+        return;
+
+    if (q->flags.guaranteedBitrate) {
+        *has_gbr_qer = true;
+        *gbr64 = saturating_add_u64(*gbr64, q->guaranteedBitrate.dl);
+        *mbr64 = saturating_add_u64(*mbr64, q->maximumBitrate.dl);
+        return;
+    }
+
+    if (q->maximumBitrate.dl > *ambr64)
+        *ambr64 = q->maximumBitrate.dl;
+}
+
+static inline bool
+GetQerRatesFromSession(UpfSession *session, uint64_t *ambr64,
+                       uint64_t *gbr64, uint64_t *mbr64,
+                       bool *has_gbr_qer)
+{
+    list_iterator_t *it;
+    list_node_t *node;
+    bool found = false;
+
+    if (!session || !session->qer_list)
+        return false;
+
+    it = list_iterator_new(session->qer_list, LIST_HEAD);
+    if (!it)
+        return false;
+
+    while ((node = list_iterator_next(it)) != NULL) {
+        const UPDK_QER *q = (const UPDK_QER *)node->val;
+        if (!q || !q->flags.maximumBitrate)
+            continue;
+
+        found = true;
+        AccumulateQerDlRates(q, ambr64, gbr64, mbr64, has_gbr_qer);
+    }
+
+    list_iterator_destroy(it);
+    return found;
+}
+
+static inline bool
+GetQerRatesFromPdr(const UPDK_PDR *pdr, uint64_t *ambr64,
+                   uint64_t *gbr64, uint64_t *mbr64,
+                   bool *has_gbr_qer)
+{
+    bool found = false;
+
+    if (!pdr || pdr->qer_count == 0)
+        return false;
+
+    int n = (int)pdr->qer_count;
+    if (n > 2) n = 2; /* safety; struct currently supports 2 */
+
+    for (int i = 0; i < n; i++) {
+        const UPDK_QER *q = pdr->qers[i];
+        if (!q || !q->flags.maximumBitrate)
+            continue;
+
+        found = true;
+        AccumulateQerDlRates(q, ambr64, gbr64, mbr64, has_gbr_qer);
+    }
+
+    return found;
+}
+
+/* Populate UE table from the owning session when possible. The session-level
+ * non-GBR QER carries AMBR; GBR-bearing QERs carry QoS flow GBR/MBR. */
+static inline int
+GetQerByUEIpAddressFromPdr(uint32_t ue_ip, UpfSession *session,
+                           const UPDK_PDR *pdr, const char *ip_str)
+{
+    if ((!session || !session->qer_list) && (!pdr || pdr->qer_count == 0)) {
         UTLT_Trace("UE %s: No PDR or PDR has no QERs, skip UE table entry",
                    ip_str ? ip_str : "<unknown>");
         return -1;
@@ -296,23 +365,14 @@ GetQerByUEIpAddressFromPdr(uint32_t ue_ip, const UPDK_PDR *pdr, const char *ip_s
     uint64_t ambr64 = 0;
     uint64_t gbr64  = 0;
     uint64_t mbr64  = 0;
+    bool has_gbr_qer = false;
 
-    int n = (int)pdr->qer_count;
-    if (n > 2) n = 2; /* safety; struct currently supports 2 */
-
-    for (int i = 0; i < n; i++) {
-        const UPDK_QER *q = pdr->qers[i];
-        if (!q) continue;
-
-        if (q->flags.maximumBitrate && q->maximumBitrate.dl > ambr64)
-            ambr64 = q->maximumBitrate.dl;
-
-        /* old behavior: only set gbr/mbr when both flags are present */
-        if (q->flags.guaranteedBitrate && q->flags.maximumBitrate) {
-            gbr64 = q->guaranteedBitrate.dl;
-            mbr64 = q->maximumBitrate.dl;
-        }
+    if (!GetQerRatesFromSession(session, &ambr64, &gbr64, &mbr64,
+                                &has_gbr_qer)) {
+        GetQerRatesFromPdr(pdr, &ambr64, &gbr64, &mbr64, &has_gbr_qer);
     }
+    if (ambr64 == 0 && mbr64 > 0)
+        ambr64 = mbr64;
 
     if (ambr64 == 0) {
         UTLT_Trace("UE %s: no DL MBR across PDR QERs, skip UE table entry",
@@ -325,6 +385,8 @@ GetQerByUEIpAddressFromPdr(uint32_t ue_ip, const UPDK_PDR *pdr, const char *ip_s
     uint32_t gbr  = (gbr64  > UINT32_MAX) ? UINT32_MAX : (uint32_t)gbr64;
     uint32_t mbr  = (mbr64  > UINT32_MAX) ? UINT32_MAX : (uint32_t)mbr64;
 
+    if (!has_gbr_qer)
+        mbr = 0;
     if (mbr && gbr > mbr) gbr = mbr;
 
     UTLT_Warning("Add UE IP: %s, AMBR: %u GBR: %u, MBR: %u",
@@ -506,9 +568,9 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
     }
 
     uint32_t cal_pktlen = 0;
+    bool cal_pktlen_valid = false;
     UTLT_Trace("Get packet\n");
     UTLT_Info("Handle PKT from port: %d [len: %d]", pkt->port, pkt->pkt_len);
-    cal_pktlen = pkt->pkt_len - sizeof(struct rte_ether_hdr) - sizeof(struct rte_ipv4_hdr) - sizeof(struct rte_udp_hdr);
 
     bool is_dl = false;
     meta->action = ONVM_NF_ACTION_DROP;
@@ -519,6 +581,8 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
         UTLT_Info("Not IP packet, ignore it\n");
         return 0;
     }
+    cal_pktlen_valid =
+        upf_u_shaper_dl_packet_len(pkt, iph, &cal_pktlen);
 
     // Flip to a newly published snapshot if a REQ was received
     UpfClsMaybeFlipAndAck();
@@ -582,9 +646,17 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
 
     if (is_dl) {
         ue_key = rte_cpu_to_be_32(iph->dst_addr);
+        if (!cal_pktlen_valid) {
+            UTLT_Warning("Invalid DL IPv4/L4 length for UE %s, drop",
+                         convertToIpAddressString(iph->dst_addr));
+            meta->action = ONVM_NF_ACTION_DROP;
+            return 0;
+        }
+        owner_session = UpfSessionFindByUeIP(ue_key);
         ue_idx = findIndexByUeIpAddress(ue_key);
         if (ue_idx < 0) {
-            ue_idx = GetQerByUEIpAddressFromPdr(ue_key, pdr, convertToIpAddressString(iph->dst_addr));
+            ue_idx = GetQerByUEIpAddressFromPdr(ue_key, owner_session, pdr,
+                                                convertToIpAddressString(iph->dst_addr));
         }
         if (!upf_u_shaper_build_dl_flow_key(pkt, pdr, ue_key, pdr->has_fd,
                                             &dl_flow_key)) {
@@ -700,12 +772,11 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
             int color_result = 0;
             bool isQos = false;
             uint64_t curr_time = rte_get_tsc_cycles();
-            struct rte_meter_trtcm_profile *trtcm_profile = NULL;
 
             if (pdr->has_fd) {
                 isQos = true;
-                trtcm_profile = &app_flow_trtcm_profile;
                 int ft_idx = ftSearch(pdr->meter_key);
+                struct rte_meter_trtcm_profile *trtcm_profile;
                 if (unlikely(ft_idx < 0 || ft_idx >= (int)APP_FLOWS_MAX)) {
                     UTLT_Warning("DL QoS: no trTCM flow for meter_key=%u (ft_idx=%d) pdr=%u seid=%lu; dropping",
                                  pdr->meter_key, ft_idx, pdr->pdrId, seid);
@@ -713,8 +784,21 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
                     meta->action = ONVM_NF_ACTION_DROP;
                     goto dl_nocp;
                 }
+                trtcm_profile = trtcmProfileForFlow(ft_idx);
+                if (unlikely(trtcm_profile == NULL)) {
+                    UTLT_Warning("DL QoS: no trTCM profile for meter_key=%u ft_idx=%d pdr=%u seid=%lu; dropping",
+                                 pdr->meter_key, ft_idx, pdr->pdrId, seid);
+                    meta->flags = RTE_COLOR_RED;
+                    meta->action = ONVM_NF_ACTION_DROP;
+                    goto dl_nocp;
+                }
                 color_result = trtcmColorHandle(cal_pktlen, curr_time,
                                                 ft_idx, trtcm_profile);
+                if (unlikely(color_result < 0)) {
+                    meta->flags = RTE_COLOR_RED;
+                    meta->action = ONVM_NF_ACTION_DROP;
+                    goto dl_nocp;
+                }
                 // set the meta action to out for now, and trtcmPolicer will update it to drop if color is red
                 meta->action = ONVM_NF_ACTION_OUT;
                 if (trtcmPolicer(meta, color_result) > 0)
@@ -826,8 +910,22 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
                     }
 
                     uint64_t curr_time = rte_get_tsc_cycles();
+                    struct rte_meter_trtcm_profile *trtcm_profile =
+                        trtcmProfileForFlow(ft_idx);
+                    if (unlikely(trtcm_profile == NULL)) {
+                        UTLT_Warning("UL QoS: no trTCM profile for meter_key=%u ft_idx=%d pdr=%u seid=%lu; dropping",
+                                    pdr->meter_key, ft_idx, pdr->pdrId, seid);
+                        meta->flags = RTE_COLOR_RED;
+                        meta->action = ONVM_NF_ACTION_DROP;
+                        return 0;
+                    }
                     int color_result = trtcmColorHandle(pkt->pkt_len, curr_time,
-                                                        ft_idx, &app_flow_trtcm_profile);
+                                                        ft_idx, trtcm_profile);
+                    if (unlikely(color_result < 0)) {
+                        meta->flags = RTE_COLOR_RED;
+                        meta->action = ONVM_NF_ACTION_DROP;
+                        return 0;
+                    }
                     if (trtcmPolicer(meta, color_result) > 0)
                         UTLT_Error("UL trTCM Policer error");
 
@@ -890,9 +988,15 @@ static uint64_t last_p = 0;
 
 static int
 callback_handler(struct onvm_nf_local_ctx *nf_local_ctx) {
+    struct onvm_nf *nf;
+    uint64_t cur_p;
+
+    if (unlikely(nf_local_ctx == NULL || nf_local_ctx->nf == NULL))
+        return 0;
+
+    nf = nf_local_ctx->nf;
     if (unlikely(!last_p)) last_p = rte_get_tsc_cycles();
-    uint64_t cur_p = rte_get_tsc_cycles();
-    struct onvm_nf *nf = nf_local_ctx->nf;
+    cur_p = rte_get_tsc_cycles();
 
     upf_u_shaper_drain(nf);
 
