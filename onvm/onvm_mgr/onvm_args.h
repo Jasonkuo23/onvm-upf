@@ -57,6 +57,9 @@
 
 #define DEFAULT_SERVICE_ID 1
 
+/* Zero means that the port uses flow lookup/default-chain dispatch. */
+extern uint16_t onvm_port_service_map[RTE_MAX_ETHPORTS];
+
 int
 parse_app_args(uint8_t max_ports, int argc, char *argv[]);
 

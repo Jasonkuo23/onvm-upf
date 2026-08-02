@@ -23,6 +23,7 @@
 #include <yaml.h>
 
 #include "upf_u_config.h"
+#include "onvm_common.h"
 #include "utlt_debug.h"
 
 struct rte_ether_addr g_cn_ue_eth;
@@ -31,6 +32,10 @@ struct rte_ether_addr g_cn_dn_eth;
 uint16_t g_n3_port = 0;
 uint16_t g_n6_port   = 0;
 uint16_t g_sgi_port    = 0;
+
+uint8_t g_n3iwf_enabled = 0;
+uint32_t g_n3iwf_n3_ip_be = 0;
+uint16_t g_n3iwf_service_id = 0;
 
 uint32_t g_n3_ip_be = 0;
 uint32_t g_n6_ip_be = 0;
@@ -203,6 +208,49 @@ do_parse(yaml_document_t *doc) {
             if (v < 0 || v > 255) { fprintf(stderr, "[UPF-U][CONFIG] bad ports.n6_port\n"); return -1; }
             g_n6_port = (uint16_t)v;
             g_sgi_port  = (uint16_t)v;
+        }
+    }
+
+    /* Optional same-server N3IWF route. The FAR peer address remains the
+     * per-session selector; this block only declares which peer is internal. */
+    {
+        yaml_node_t *n3iwf = map_get(doc, dp, "n3iwf");
+        if (n3iwf && n3iwf->type != YAML_MAPPING_NODE) {
+            fprintf(stderr, "[UPF-U][CONFIG] dataplane.n3iwf must be a mapping\n");
+            return -1;
+        }
+        if (n3iwf) {
+            const char *enabled = scalar_str(map_get(doc, n3iwf, "enabled"));
+
+            if (!enabled || (strcmp(enabled, "true") != 0 &&
+                             strcmp(enabled, "false") != 0 &&
+                             strcmp(enabled, "1") != 0 &&
+                             strcmp(enabled, "0") != 0)) {
+                fprintf(stderr, "[UPF-U][CONFIG] invalid n3iwf.enabled\n");
+                return -1;
+            }
+            g_n3iwf_enabled = (strcmp(enabled, "true") == 0 ||
+                               strcmp(enabled, "1") == 0);
+            if (g_n3iwf_enabled) {
+                const char *peer = scalar_str(map_get(doc, n3iwf, "peer_n3_ip"));
+                const char *service = scalar_str(map_get(doc, n3iwf, "service_id"));
+                int value;
+
+                if (!peer || parse_ipv4_address(peer, &g_n3iwf_n3_ip_be) != 0) {
+                    fprintf(stderr, "[UPF-U][CONFIG] invalid n3iwf.peer_n3_ip\n");
+                    return -1;
+                }
+                if (!service) {
+                    fprintf(stderr, "[UPF-U][CONFIG] missing n3iwf.service_id\n");
+                    return -1;
+                }
+                value = atoi(service);
+                if (value <= 0 || value >= MAX_SERVICES) {
+                    fprintf(stderr, "[UPF-U][CONFIG] invalid n3iwf.service_id\n");
+                    return -1;
+                }
+                g_n3iwf_service_id = (uint16_t)value;
+            }
         }
     }
 

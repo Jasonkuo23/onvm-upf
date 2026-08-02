@@ -57,8 +57,6 @@ void
 onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uint16_t rx_count) {
         uint16_t i;
         struct onvm_pkt_meta *meta;
-	struct rte_ether_hdr *eth_hdr;
-	uint16_t ether_type;
 #ifdef FLOW_LOOKUP
         struct onvm_flow_entry *flow_entry;
         struct onvm_service_chain *sc;
@@ -72,6 +70,13 @@ onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uin
                 meta = onvm_get_pkt_meta(pkts[i], onvm_config->dynfield_offset);
                 meta->src = 0;
                 meta->chain_index = 0;
+                if (pkts[i]->port < RTE_MAX_ETHPORTS &&
+                    onvm_port_service_map[pkts[i]->port] != 0) {
+                        /* Explicit physical-port routes are authoritative.
+                         * NWu traffic must not enter the UPF default chain. */
+                        meta->action = ONVM_NF_ACTION_TONF;
+                        meta->destination = onvm_port_service_map[pkts[i]->port];
+                } else {
 #ifdef FLOW_LOOKUP
                 ret = onvm_flow_dir_get_pkt(pkts[i], &flow_entry);
                 if (ret >= 0) {
@@ -85,6 +90,7 @@ onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uin
 #ifdef FLOW_LOOKUP
                 }
 #endif
+                }
                 /* PERF: this might hurt performance since it will cause cache
                  * invalidations. Ideally the data modified by the NF manager
                  * would be a different line than that modified/read by NFs.

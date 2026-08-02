@@ -1,7 +1,7 @@
 #!/bin/bash
 
 function usage {
-        echo "$0 -k PORTMASK -n NF-COREMASK [-m MANAGER CORES] [-r NUM-SERVICES] [-d DEFAULT-SERVICE] [-s STATS-OUTPUT] [-p WEB-PORT-NUMBER] [-z STATS-SLEEP-TIME]"
+        echo "$0 -k PORTMASK -n NF-COREMASK [-m MANAGER CORES] [-r NUM-SERVICES] [-d DEFAULT-SERVICE] [-i PORT:SERVICE,...] [-s STATS-OUTPUT] [-p WEB-PORT-NUMBER] [-z STATS-SLEEP-TIME]"
         # this works well on our 2x6-core nodes
         echo "$0 -k 3 -n 0xF0 --> cores 0,1,2, with ports 0 and 1, with NFs running on cores 4,5,6,7"
         echo -e "\tBy default, cores will be used as follows in numerical order:"
@@ -104,6 +104,7 @@ SCRIPTPATH=$(dirname "$SCRIPT")
 verbosity=1
 # Initialize base virtual address to empty.
 virt_addr=""
+port_service_map=""
 
 # only check for duplicate manager if not in Docker container
 if [[ -n $(pgrep -u root -f "/onvm_mgr/.*/onvm_mgr") ]] && ! grep -q "docker" /proc/1/cgroup
@@ -112,11 +113,12 @@ then
     exit 1
 fi
 
-while getopts "a:r:d:s:t:l:p:z:cvm:k:n:j" opt; do
+while getopts "a:r:d:i:s:t:l:p:z:cvm:k:n:j" opt; do
     case $opt in
         a) virt_addr="--base-virtaddr=$OPTARG";;
         r) num_srvc="-r $OPTARG";;
         d) def_srvc="-d $OPTARG";;
+        i) port_service_map="-i $OPTARG";;
         s) stats="-s $OPTARG";;
         t) ttl="-t $OPTARG";;
         l) packet_limit="-l $OPTARG";;
@@ -285,7 +287,7 @@ sudo ./build/onvm/onvm_mgr/onvm_mgr \
     -l "$cpu" -n 4 --proc-type=primary \
     "${allow_args[@]}" \
     ${virt_addr} \
-    -- -p ${ports} -n ${nf_cores} ${num_srvc} ${def_srvc} ${stats} ${stats_sleep_time} ${verbosity_level} ${ttl} ${packet_limit} ${shared_cpu_flag} ${jumbo_frames_flag}
+    -- -p ${ports} -n ${nf_cores} ${num_srvc} ${def_srvc} ${port_service_map} ${stats} ${stats_sleep_time} ${verbosity_level} ${ttl} ${packet_limit} ${shared_cpu_flag} ${jumbo_frames_flag}
 
 if [ "${stats}" = "-s web" ]
 then

@@ -61,6 +61,9 @@ uint16_t num_services = MAX_SERVICES;
 /* global var for the default service id - extern in init.h */
 uint16_t default_service = DEFAULT_SERVICE_ID;
 
+/* Optional physical ingress port -> first NF service mapping. */
+uint16_t onvm_port_service_map[RTE_MAX_ETHPORTS];
+
 /* global var to where to print stats - extern in init.h */
 ONVM_STATS_OUTPUT stats_destination = ONVM_STATS_NONE;
 
@@ -97,6 +100,9 @@ static int
 parse_default_service(const char *services);
 
 static int
+parse_port_service_map(uint8_t max_ports, const char *mappings);
+
+static int
 parse_num_services(const char *services);
 
 static int
@@ -130,11 +136,12 @@ parse_app_args(uint8_t max_ports, int argc, char *argv[]) {
             {"stats-out", no_argument, NULL, 's'},       {"stats-sleep-time", no_argument, NULL, 'z'},
             {"time_to_live", no_argument, NULL, 't'},    {"packet_limit", no_argument, NULL, 'l'},
             {"verbocity-level", no_argument, NULL, 'v'}, {"enable_shared_cpu", no_argument, NULL, 'c'},
-            {"jumbo_frames", no_argument, NULL, 'j'}};
+            {"jumbo_frames", no_argument, NULL, 'j'},
+            {"port-service-map", required_argument, NULL, 'i'}};
 
         progname = argv[0];
 
-        while ((opt = getopt_long(argc, argvopt, "p:r:n:d:s:t:l:z:v:cj", lgopts, &option_index)) != EOF) {
+        while ((opt = getopt_long(argc, argvopt, "p:r:n:d:i:s:t:l:z:v:cj", lgopts, &option_index)) != EOF) {
                 switch (opt) {
                         case 'p':
                                 if (parse_portmask(max_ports, optarg) != 0) {
@@ -156,6 +163,12 @@ parse_app_args(uint8_t max_ports, int argc, char *argv[]) {
                                 break;
                         case 'd':
                                 if (parse_default_service(optarg) != 0) {
+                                        usage();
+                                        return -1;
+                                }
+                                break;
+                        case 'i':
+                                if (parse_port_service_map(max_ports, optarg) != 0) {
                                         usage();
                                         return -1;
                                 }
@@ -206,6 +219,14 @@ parse_app_args(uint8_t max_ports, int argc, char *argv[]) {
                 }
         }
 
+        for (uint16_t port = 0; port < RTE_MAX_ETHPORTS; port++) {
+                if (onvm_port_service_map[port] >= num_services) {
+                        fprintf(stderr,
+                                "Port %u maps to service %u, outside configured service range 1..%u\n",
+                                port, onvm_port_service_map[port], num_services - 1);
+                        return -1;
+                }
+        }
         return 0;
 }
 
@@ -218,6 +239,7 @@ usage(void) {
             "\t-p PORTMASK: hexadecimal bitmask of ports to use\n"
             "\t-r NUM_SERVICES: number of unique serivces allowed. defaults to 16 (optional)\n"
             "\t-d DEFAULT_SERVICE: the service to initially receive packets. defaults to 1 (optional)\n"
+            "\t-i PORT:SERVICE,...: map physical ingress ports to first services (optional)\n"
             "\t-s STATS_OUTPUT: where to output manager stats (stdout/stderr/web). defaults to NONE (optional)\n"
             "\t-z STATS_SLEEP_TIME: how long the stats thread should wait before updating the stats (in seconds)\n"
             "\t-t TTL: time to live, how many seconds to wait until exiting (optional)\n"
@@ -274,6 +296,43 @@ parse_default_service(const char *services) {
                 return -1;
 
         default_service = (uint16_t)temp;
+        return 0;
+}
+
+static int
+parse_port_service_map(uint8_t max_ports, const char *mappings) {
+        char input[256];
+        char *entry;
+        char *saveptr = NULL;
+
+        if (mappings == NULL || mappings[0] == '\0' ||
+            strlen(mappings) >= sizeof(input))
+                return -1;
+        memset(onvm_port_service_map, 0, sizeof(onvm_port_service_map));
+        memcpy(input, mappings, strlen(mappings) + 1);
+
+        entry = strtok_r(input, ",", &saveptr);
+        while (entry != NULL) {
+                char *separator = strchr(entry, ':');
+                char *port_end = NULL;
+                char *service_end = NULL;
+                unsigned long port;
+                unsigned long service;
+
+                if (separator == NULL || separator == entry || separator[1] == '\0' ||
+                    strchr(separator + 1, ':') != NULL)
+                        return -1;
+                *separator = '\0';
+                port = strtoul(entry, &port_end, 10);
+                service = strtoul(separator + 1, &service_end, 10);
+                if (*port_end != '\0' || *service_end != '\0' ||
+                    port >= max_ports || port >= RTE_MAX_ETHPORTS ||
+                    service == 0 || service >= MAX_SERVICES ||
+                    onvm_port_service_map[port] != 0)
+                        return -1;
+                onvm_port_service_map[port] = (uint16_t)service;
+                entry = strtok_r(NULL, ",", &saveptr);
+        }
         return 0;
 }
 

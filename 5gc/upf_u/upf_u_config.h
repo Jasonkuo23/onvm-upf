@@ -30,6 +30,10 @@ extern uint16_t  g_n3_port;      // UPF-U DPDK port connected to the access side
 extern uint16_t  g_n6_port;      // UPF-U DPDK port connected to the core side (SGi)
 extern uint16_t  g_sgi_port;     // UPF-U DPDK port connected to the SGi side
 
+extern uint8_t  g_n3iwf_enabled;       // Route matching N3 peers to n3iwf-dp
+extern uint32_t g_n3iwf_n3_ip_be;      // Logical N3 IPv4 address of N3IWF
+extern uint16_t g_n3iwf_service_id;    // ONVM service ID of n3iwf-dp
+
 extern uint8_t  g_nat_enabled;       // Enable dynamic IPv4 NAT on N6
 extern uint32_t g_an_peer_n3_ip_be;  // Next-hop IP of the AN/gNB peer
 extern uint32_t g_dn_peer_n6_ip_be;  // Next-hop IP of the DN/upstream router peer

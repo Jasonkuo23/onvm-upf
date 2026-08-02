@@ -56,6 +56,7 @@
 #include "upf_u_arp.h"
 #include "upf_u_icmp.h"
 #include "upf_u_nat.h"
+#include "upf_u_n3iwf.h"
 #include "upf_u_shaper.h"
 #include "upf_u_trtcm.h"
 
@@ -525,12 +526,15 @@ drain_session_batch(int sess_idx, uint32_t max_pkts, struct onvm_nf *nf) {
                         (void **)drain_buf, want, NULL);
         if (n == 0) break;
 
-        /* Restore action to OUT so onvm_pkt_process_tx_batch sends them */
+        /* Restore the route stored in packet metadata before buffering. */
         for (uint32_t j = 0; j < n; j++) {
             struct onvm_pkt_meta *m =
                 onvm_get_pkt_meta(drain_buf[j],
                                   onvm_config->dynfield_offset);
-            m->action = ONVM_NF_ACTION_OUT;
+            bool use_n3iwf = g_n3iwf_enabled &&
+                             m->destination == g_n3iwf_service_id;
+            upf_u_n3iwf_set_route(m, use_n3iwf, g_n3iwf_service_id,
+                                  g_n3_port);
         }
 
         onvm_pkt_process_tx_batch(nf->nf_tx_mgr, drain_buf,
@@ -716,29 +720,42 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
             goto dl_nocp;
         }
 
-        /* Encap (GTP-U outer header) */
-        if (far->flags.forwardingParameters &&
-            far->forwardingParameters.flags.outerHeaderCreation) {
-            UPDK_OuterHeaderCreation *ohc =
-                &far->forwardingParameters.outerHeaderCreation;
-            if (ohc->description ==
-                UPDK_OUTER_HEADER_CREATION_DESCRIPTION_GTPU_UDP_IPV4)
-                Encap(pkt, far, pdr->qer);
-        }
-
-        uint32_t gnb_n3_ip_be = g_nat_enabled 
-            ? g_an_peer_n3_ip_be
-            : far->forwardingParameters.outerHeaderCreation.ipv4.s_addr;
-        UTLT_Trace("gNB N3 IP: %s\n", convertToIpAddressString(gnb_n3_ip_be));
-
-        // Regardless of BUFF vs FORW, we need to attach L2 (or ARP) header
-        // before sending to N3 port.
-        if (attach_l2_or_arp(pkt, g_n3_port, g_n3_ip_be, gnb_n3_ip_be,
-                            nf_local_ctx->nf) < 0) {
-            meta->action = ONVM_NF_ACTION_DROP;   /* or buffer */
+        /* This initial N3IWF path accepts only GTP-U/UDP/IPv4 FARs. */
+        if (!far->flags.forwardingParameters ||
+            !far->forwardingParameters.flags.outerHeaderCreation ||
+            far->forwardingParameters.outerHeaderCreation.description !=
+                UPDK_OUTER_HEADER_CREATION_DESCRIPTION_GTPU_UDP_IPV4) {
+            UTLT_Error("DL FAR has no supported GTP-U/UDP/IPv4 outer header");
+            meta->action = ONVM_NF_ACTION_DROP;
             return 0;
         }
-        meta->destination = g_n3_port; // DL always goes to N3 port after FAR processing (may be modified by QoS policing below)
+        Encap(pkt, far, pdr->qer);
+
+        uint32_t far_peer_n3_ip_be =
+            far->forwardingParameters.outerHeaderCreation.ipv4.s_addr;
+        bool use_n3iwf = upf_u_n3iwf_peer_matches(
+            g_n3iwf_enabled, g_n3iwf_n3_ip_be, far_peer_n3_ip_be);
+        uint32_t gnb_n3_ip_be = g_nat_enabled
+            ? g_an_peer_n3_ip_be
+            : far_peer_n3_ip_be;
+        UTLT_Trace("gNB N3 IP: %s\n", convertToIpAddressString(gnb_n3_ip_be));
+
+        if (use_n3iwf) {
+            /* Internal N3 keeps Ethernet framing for the receiving parser,
+             * but must not perform physical neighbor resolution. */
+            if (upf_u_n3iwf_prepend_internal_ethernet(pkt) < 0) {
+                meta->action = ONVM_NF_ACTION_DROP;
+                return 0;
+            }
+        } else {
+            if (attach_l2_or_arp(pkt, g_n3_port, g_n3_ip_be, gnb_n3_ip_be,
+                                 nf_local_ctx->nf) < 0) {
+                meta->action = ONVM_NF_ACTION_DROP;
+                return 0;
+            }
+        }
+        upf_u_n3iwf_set_route(meta, use_n3iwf, g_n3iwf_service_id,
+                              g_n3_port);
 
         if (far_action == UPDK_FAR_APPLY_ACTION_BUFF) {
             /* Buffer-only: prepare packet for later TX, enqueue, then DROP */
@@ -839,7 +856,8 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
         if (sb->touched)
             drain_session_batch(sess_idx, INLINE_DRAIN_BATCH, nf);
 
-        meta->action = ONVM_NF_ACTION_OUT;
+        upf_u_n3iwf_set_route(meta, use_n3iwf, g_n3iwf_service_id,
+                              g_n3_port);
 
         goto dl_nocp;
 
