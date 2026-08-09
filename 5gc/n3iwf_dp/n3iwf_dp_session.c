@@ -107,6 +107,15 @@ qfi_allowed(const struct n3iwf_dp_session *session, uint8_t qfi)
            (session->qfi_bitmap & (UINT64_C(1) << qfi)) != 0;
 }
 
+static bool
+valid_unicast_mac(const uint8_t mac[N3IWF_DP_ETHER_ADDR_LEN])
+{
+    static const uint8_t zero[N3IWF_DP_ETHER_ADDR_LEN] = {0};
+
+    return mac != NULL && (mac[0] & 1U) == 0 &&
+           memcmp(mac, zero, sizeof(zero)) != 0;
+}
+
 void
 n3iwf_dp_session_table_init(struct n3iwf_dp_session_table *table)
 {
@@ -129,13 +138,12 @@ n3iwf_dp_session_upsert_wire(struct n3iwf_dp_session_table *table,
 
     /*
      * Wire v1 deliberately exposes only the dataplane slice that is complete:
-     * IPv4 and one active QoS flow per PDU session.  The fixed-size wire
-     * fields remain forward-compatible with IPv6/multi-QFI, but accepting
-     * them before lookup and packet processing support is complete would turn
-     * a control-plane ACK into a false promise.
+     * IPv4. Multi-QFI is represented as a bitmap and is already consumed by
+     * both GRE and GTP-U lookup paths.
      */
     if (table == NULL || wire == NULL || generation == 0 ||
-        wire->address_family != N3IWF_DP_AF_IPV4 || wire->qfi_count != 1) {
+        wire->address_family != N3IWF_DP_AF_IPV4 || wire->qfi_count == 0 ||
+        wire->qfi_count > N3IWF_DP_MAX_QFI) {
         return N3IWF_DP_STATUS_BAD_MESSAGE;
     }
 
@@ -188,6 +196,17 @@ n3iwf_dp_session_upsert_wire(struct n3iwf_dp_session_table *table,
         }
         existing = free_entry;
     } else {
+        if (table->entries[existing].address_family ==
+                candidate.address_family &&
+            memcmp(table->entries[existing].ue_nwu_address,
+                   candidate.ue_nwu_address,
+                   address_len(candidate.address_family)) == 0 &&
+            table->entries[existing].ue_access_mac_valid) {
+            candidate.ue_access_mac_valid = true;
+            memcpy(candidate.ue_access_mac,
+                   table->entries[existing].ue_access_mac,
+                   sizeof(candidate.ue_access_mac));
+        }
         index_remove(table->uplink_index, (uint32_t)existing);
         index_remove(table->downlink_index, (uint32_t)existing);
     }
@@ -208,6 +227,36 @@ n3iwf_dp_session_upsert_wire(struct n3iwf_dp_session_table *table,
         ++table->count;
     }
     return N3IWF_DP_STATUS_OK;
+}
+
+struct n3iwf_dp_session *
+n3iwf_dp_session_find_uplink_mutable(
+    struct n3iwf_dp_session_table *table, uint8_t family,
+    const uint8_t address[N3IWF_DP_ADDR_LEN], uint8_t qfi)
+{
+    return (struct n3iwf_dp_session *)n3iwf_dp_session_find_uplink(
+        table, family, address, qfi);
+}
+
+enum n3iwf_dp_mac_learn_result
+n3iwf_dp_session_learn_access_mac(
+    struct n3iwf_dp_session *session,
+    const uint8_t mac[N3IWF_DP_ETHER_ADDR_LEN])
+{
+    if (session == NULL || !session->used || !valid_unicast_mac(mac)) {
+        return N3IWF_DP_MAC_INVALID;
+    }
+    if (!session->ue_access_mac_valid) {
+        memcpy(session->ue_access_mac, mac, sizeof(session->ue_access_mac));
+        session->ue_access_mac_valid = true;
+        return N3IWF_DP_MAC_LEARNED;
+    }
+    if (memcmp(session->ue_access_mac, mac,
+               sizeof(session->ue_access_mac)) == 0) {
+        return N3IWF_DP_MAC_UNCHANGED;
+    }
+    memcpy(session->ue_access_mac, mac, sizeof(session->ue_access_mac));
+    return N3IWF_DP_MAC_CHANGED;
 }
 
 enum n3iwf_dp_status

@@ -17,6 +17,7 @@
 #define N3IWF_DP_WIRE_VERSION 1U
 #define N3IWF_DP_MAX_QFI 63U
 #define N3IWF_DP_ADDR_LEN 16U
+#define N3IWF_DP_MAX_KEY_LEN 64U
 
 enum n3iwf_dp_message_type {
     N3IWF_DP_MSG_HELLO = 1,
@@ -42,6 +43,16 @@ enum n3iwf_dp_status {
 enum n3iwf_dp_address_family {
     N3IWF_DP_AF_IPV4 = 4,
     N3IWF_DP_AF_IPV6 = 6,
+};
+
+enum n3iwf_dp_client_role {
+    N3IWF_DP_ROLE_WRITER = 1,
+    N3IWF_DP_ROLE_OBSERVER = 2,
+};
+
+enum n3iwf_dp_child_sa_flags {
+    N3IWF_DP_CHILD_SA_NAT_T = 1U << 0,
+    N3IWF_DP_CHILD_SA_ESN = 1U << 1,
 };
 
 struct n3iwf_dp_wire_header {
@@ -74,6 +85,53 @@ struct n3iwf_dp_session_delete_wire {
     uint32_t pdu_session_id;
 } __attribute__((packed));
 
+struct n3iwf_dp_hello_wire {
+    uint8_t role;
+    uint8_t reserved[3];
+} __attribute__((packed));
+
+/*
+ * One bidirectional ESP Child-SA pair. Algorithm values are the IKEv2
+ * Transform IDs from RFC 7296/IANA, not implementation-specific enums.
+ * Keys are directionally explicit from the N3IWF point of view.
+ */
+struct n3iwf_dp_child_sa_wire {
+    uint64_t ue_id;
+    uint32_t pdu_session_id; /* zero for the signalling Child SA */
+    uint32_t inbound_spi;    /* UE -> N3IWF */
+    uint32_t outbound_spi;   /* N3IWF -> UE */
+    uint16_t encryption_id;
+    uint16_t integrity_id;
+    uint16_t local_port;
+    uint16_t peer_port;
+    uint32_t replay_window;
+    uint32_t flags;
+    uint64_t outbound_sequence;
+    uint64_t soft_lifetime_seconds;
+    uint64_t hard_lifetime_seconds;
+    uint8_t address_family;
+    uint8_t ip_protocol;
+    uint8_t inbound_encryption_key_len;
+    uint8_t inbound_integrity_key_len;
+    uint8_t outbound_encryption_key_len;
+    uint8_t outbound_integrity_key_len;
+    uint8_t reserved[2];
+    uint8_t local_address[N3IWF_DP_ADDR_LEN];
+    uint8_t peer_address[N3IWF_DP_ADDR_LEN];
+    uint8_t local_selector[N3IWF_DP_ADDR_LEN];
+    uint8_t peer_selector[N3IWF_DP_ADDR_LEN];
+    uint8_t inbound_encryption_key[N3IWF_DP_MAX_KEY_LEN];
+    uint8_t inbound_integrity_key[N3IWF_DP_MAX_KEY_LEN];
+    uint8_t outbound_encryption_key[N3IWF_DP_MAX_KEY_LEN];
+    uint8_t outbound_integrity_key[N3IWF_DP_MAX_KEY_LEN];
+} __attribute__((packed));
+
+struct n3iwf_dp_child_sa_delete_wire {
+    uint64_t ue_id;
+    uint32_t pdu_session_id;
+    uint32_t inbound_spi;
+} __attribute__((packed));
+
 struct n3iwf_dp_ack_wire {
     uint32_t status;
     uint32_t detail;
@@ -90,6 +148,12 @@ struct n3iwf_dp_stats_wire {
     uint64_t crypto_failures;
     uint64_t fragment_drops;
     uint64_t stale_updates;
+    uint64_t control_to_cp;
+    uint64_t control_from_cp;
+    uint64_t control_punt_drops;
+    uint64_t access_mac_learns;
+    uint64_t access_mac_changes;
+    uint64_t access_neighbor_drops;
 } __attribute__((packed));
 
 int

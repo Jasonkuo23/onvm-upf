@@ -47,6 +47,13 @@ main(void)
     struct n3iwf_dp_session_table table;
     struct n3iwf_dp_session_wire first = make_session(1, 10, 100, 200);
     const struct n3iwf_dp_session *found;
+    struct n3iwf_dp_session *mutable;
+    const uint8_t first_mac[N3IWF_DP_ETHER_ADDR_LEN] =
+        {0x02, 0, 0, 0, 0, 1};
+    const uint8_t changed_mac[N3IWF_DP_ETHER_ADDR_LEN] =
+        {0x02, 0, 0, 0, 0, 2};
+    const uint8_t multicast_mac[N3IWF_DP_ETHER_ADDR_LEN] =
+        {0x01, 0, 0, 0, 0, 1};
 
     n3iwf_dp_session_table_init(&table);
     assert(n3iwf_dp_session_upsert_wire(&table, &first, 1) ==
@@ -60,12 +67,29 @@ main(void)
                                         first.ue_nwu_address, 7) == NULL);
     found = n3iwf_dp_session_find_downlink(&table, 200, 5);
     assert(found != NULL && found->ue_id == 1);
+    mutable = n3iwf_dp_session_find_uplink_mutable(
+        &table, N3IWF_DP_AF_IPV4, first.ue_nwu_address, 5);
+    assert(mutable != NULL);
+    assert(n3iwf_dp_session_learn_access_mac(mutable, multicast_mac) ==
+           N3IWF_DP_MAC_INVALID);
+    assert(n3iwf_dp_session_learn_access_mac(mutable, first_mac) ==
+           N3IWF_DP_MAC_LEARNED);
+    assert(n3iwf_dp_session_learn_access_mac(mutable, first_mac) ==
+           N3IWF_DP_MAC_UNCHANGED);
+    assert(n3iwf_dp_session_learn_access_mac(mutable, changed_mac) ==
+           N3IWF_DP_MAC_CHANGED);
+    assert(memcmp(mutable->ue_access_mac, changed_mac,
+                  N3IWF_DP_ETHER_ADDR_LEN) == 0);
 
     assert(n3iwf_dp_session_upsert_wire(&table, &first, 1) ==
            N3IWF_DP_STATUS_STALE_GENERATION);
     first.downlink_teid = htonl(201);
     assert(n3iwf_dp_session_upsert_wire(&table, &first, 2) ==
            N3IWF_DP_STATUS_OK);
+    found = n3iwf_dp_session_find_downlink(&table, 201, 5);
+    assert(found != NULL && found->ue_access_mac_valid);
+    assert(memcmp(found->ue_access_mac, changed_mac,
+                  N3IWF_DP_ETHER_ADDR_LEN) == 0);
     assert(n3iwf_dp_session_find_downlink(&table, 200, 5) == NULL);
     assert(n3iwf_dp_session_find_downlink(&table, 201, 5) != NULL);
 
@@ -82,8 +106,10 @@ main(void)
 
     first.qfi[0] = 5;
     first.qfi_count = 2;
+    first.qfi[1] = 9;
     assert(n3iwf_dp_session_upsert_wire(&table, &first, 4) ==
-           N3IWF_DP_STATUS_BAD_MESSAGE);
+           N3IWF_DP_STATUS_OK);
+    assert(n3iwf_dp_session_find_downlink(&table, 201, 9) != NULL);
 
     first.qfi_count = 1;
     first.address_family = N3IWF_DP_AF_IPV6;

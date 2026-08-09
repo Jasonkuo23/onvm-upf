@@ -62,7 +62,8 @@ outer_view(const uint8_t *data, size_t length, size_t *ip_length,
 static int
 prepend_clear_gre(struct rte_mbuf *packet,
                   const struct n3iwf_dp_session *session, uint8_t qfi,
-                  uint16_t inner_protocol)
+                  uint16_t inner_protocol,
+                  const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
 {
     uint8_t gre_header[8];
     size_t gre_length = 0;
@@ -85,6 +86,10 @@ prepend_clear_gre(struct rte_mbuf *packet,
     }
     memset(headers, 0, headers_length);
     ether = (struct rte_ether_hdr *)headers;
+    memcpy(ether->src_addr.addr_bytes, access_mac,
+           N3IWF_DP_ETHER_ADDR_LEN);
+    memcpy(ether->dst_addr.addr_bytes, session->ue_access_mac,
+           N3IWF_DP_ETHER_ADDR_LEN);
 
     if (session->address_family == N3IWF_DP_AF_IPV4) {
         struct rte_ipv4_hdr *ipv4 =
@@ -129,7 +134,8 @@ n3iwf_dp_handle_clear_downlink(
     struct onvm_pkt_meta *meta,
     const struct n3iwf_dp_session_table *sessions,
     struct n3iwf_dp_stats_wire *stats,
-    uint16_t access_port)
+    uint16_t access_port,
+    const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
 {
     const uint8_t *data;
     size_t length;
@@ -174,6 +180,10 @@ n3iwf_dp_handle_clear_downlink(
         ++stats->unknown_teid;
         return -ENOENT;
     }
+    if (!session->ue_access_mac_valid || access_mac == NULL) {
+        ++stats->access_neighbor_drops;
+        return -EHOSTUNREACH;
+    }
     if (gtp.payload_len == 0 ||
         ((gtp.payload[0] >> 4) != 4 && (gtp.payload[0] >> 4) != 6)) {
         ++stats->malformed_packets;
@@ -185,7 +195,8 @@ n3iwf_dp_handle_clear_downlink(
     inner_offset = gtp_offset + gtp.header_len;
     if (inner_offset > UINT16_MAX ||
         rte_pktmbuf_adj(packet, (uint16_t)inner_offset) == NULL ||
-        prepend_clear_gre(packet, session, gtp.qfi, inner_protocol) != 0) {
+        prepend_clear_gre(packet, session, gtp.qfi, inner_protocol,
+                          access_mac) != 0) {
         ++stats->malformed_packets;
         return -ENOSPC;
     }

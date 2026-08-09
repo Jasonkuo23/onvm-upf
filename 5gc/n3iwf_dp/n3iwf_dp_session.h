@@ -14,6 +14,14 @@
 #define N3IWF_DP_MAX_SESSIONS 4096U
 #define N3IWF_DP_INDEX_SIZE 8192U
 #define N3IWF_DP_INDEX_TOMBSTONE UINT32_MAX
+#define N3IWF_DP_ETHER_ADDR_LEN 6U
+
+enum n3iwf_dp_mac_learn_result {
+    N3IWF_DP_MAC_INVALID = -1,
+    N3IWF_DP_MAC_UNCHANGED = 0,
+    N3IWF_DP_MAC_LEARNED = 1,
+    N3IWF_DP_MAC_CHANGED = 2,
+};
 
 struct n3iwf_dp_session {
     bool used;
@@ -29,6 +37,8 @@ struct n3iwf_dp_session {
     uint8_t n3iwf_n3_address[N3IWF_DP_ADDR_LEN];
     uint8_t upf_n3_address[N3IWF_DP_ADDR_LEN];
     uint64_t qfi_bitmap;
+    bool ue_access_mac_valid;
+    uint8_t ue_access_mac[N3IWF_DP_ETHER_ADDR_LEN];
 };
 
 struct n3iwf_dp_session_table {
@@ -55,6 +65,16 @@ n3iwf_dp_session_find_uplink(const struct n3iwf_dp_session_table *table,
                              uint8_t address_family,
                              const uint8_t ue_nwu_address[N3IWF_DP_ADDR_LEN],
                              uint8_t qfi);
+
+struct n3iwf_dp_session *
+n3iwf_dp_session_find_uplink_mutable(
+    struct n3iwf_dp_session_table *table, uint8_t address_family,
+    const uint8_t ue_nwu_address[N3IWF_DP_ADDR_LEN], uint8_t qfi);
+
+enum n3iwf_dp_mac_learn_result
+n3iwf_dp_session_learn_access_mac(
+    struct n3iwf_dp_session *session,
+    const uint8_t mac[N3IWF_DP_ETHER_ADDR_LEN]);
 
 const struct n3iwf_dp_session *
 n3iwf_dp_session_find_downlink(const struct n3iwf_dp_session_table *table,

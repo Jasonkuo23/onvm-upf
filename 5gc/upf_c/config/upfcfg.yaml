@@ -12,7 +12,8 @@ configuration:
     - addr: 127.0.0.8
 
   gtpu:
-    - addr: 10.100.200.3
+    # Logical N3 address advertised to SMF in PFCP. UPF-U owns packet I/O.
+    - addr: 192.168.2.2
     # [optional] gtpu.name
     # - name: upf.5gc.nctu.me
     # [optional] gtpu.ifname
@@ -27,6 +28,6 @@ configuration:
 
   dnn_list:
     - dnn: internet
-      cidr: 10.60.0.0/24
+      cidr: 10.60.0.0/16
       # [optional] dnn_list[*].natifname
       # natifname: eth0
