@@ -5,29 +5,25 @@ info:
 configuration:
   log_level: "warning"  # trace, debug, info, warning, error, fatal, panic
   dataplane:
-    # Logical same-host N3 endpoint carried inside ONVM mbufs. It is not
-    # assigned to a Linux or physical interface.
-    upf_n3_ip: "192.168.2.2"
-    # Address owned by UPF-U on physical DPDK port 0 toward the DN.
+    # Logical N3 carried over the N3IWF-DP/UPF-U ONVM ring.
+    upf_n3_ip: "192.168.4.2"
+    # Physical N6 owned by UPF-U on mlx5 DPDK port 0.
     upf_n6_ip: "192.168.3.1"
 
     ports:
-      n3_port: 1                     # Access-side port; N3IWF N3 is logical
-      n6_port: 0                     # Physical NIC port toward the DN
+      n3_port: 1
+      n6_port: 0
 
-    # Same-server N3IWF sessions use standard N3 packets over an ONVM ring.
-    # The peer address selects only N3IWF FARs; ordinary gNB FARs still use
-    # physical N3 output during the transition.
     n3iwf:
       enabled: true
-      peer_n3_ip: "192.168.2.1"
+      peer_n3_ip: "192.168.4.1"
       service_id: 14
 
   # NAT configuration (optional)
   nat:
     enable: false # true/false or 1/0
-    an_peer_n3_ip: "192.168.2.1"    # Logical N3IWF N3 endpoint
-    dn_peer_n6_ip: "192.168.3.2"    # Directly attached DN next hop
+    an_peer_n3_ip: "192.168.4.1"
+    dn_peer_n6_ip: "192.168.3.2"
     public_ip: "192.168.3.1"
     port_min: 10000
     port_max: 60000

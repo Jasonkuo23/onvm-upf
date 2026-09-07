@@ -5,6 +5,7 @@
 #include "n3iwf_dp_downlink.h"
 
 #include "n3iwf_dp_codec.h"
+#include "n3iwf_dp_mtu.h"
 
 #include <errno.h>
 #include <netinet/in.h>
@@ -42,6 +43,10 @@ outer_view(const uint8_t *data, size_t length, size_t *ip_length,
             length < sizeof(*ether) + *ip_length) {
             return -EMSGSIZE;
         }
+        if ((rte_be_to_cpu_16(ipv4->fragment_offset) &
+             (RTE_IPV4_HDR_MF_FLAG | RTE_IPV4_HDR_OFFSET_MASK)) != 0) {
+            return -EINPROGRESS;
+        }
         *next_header = ipv4->next_proto_id;
         return 0;
     }
@@ -52,6 +57,9 @@ outer_view(const uint8_t *data, size_t length, size_t *ip_length,
             return -EMSGSIZE;
         }
         ipv6 = (const struct rte_ipv6_hdr *)(data + sizeof(*ether));
+        if (ipv6->proto == IPPROTO_FRAGMENT) {
+            return -EINPROGRESS;
+        }
         *ip_length = sizeof(*ipv6);
         *next_header = ipv6->proto;
         return 0;
@@ -62,7 +70,7 @@ outer_view(const uint8_t *data, size_t length, size_t *ip_length,
 static int
 prepend_clear_gre(struct rte_mbuf *packet,
                   const struct n3iwf_dp_session *session, uint8_t qfi,
-                  uint16_t inner_protocol,
+                  bool rqi, uint16_t inner_protocol,
                   const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
 {
     uint8_t gre_header[8];
@@ -77,7 +85,8 @@ prepend_clear_gre(struct rte_mbuf *packet,
     struct rte_ether_hdr *ether;
 
     if (n3iwf_dp_gre_build(gre_header, sizeof(gre_header), inner_protocol, qfi,
-                           NULL, 0, &gre_length) != 0) {
+                           rqi, N3IWF_DP_DOWNLINK, NULL, 0,
+                           &gre_length) != 0) {
         return -EINVAL;
     }
     headers = (uint8_t *)rte_pktmbuf_prepend(packet, headers_length);
@@ -137,6 +146,20 @@ n3iwf_dp_handle_clear_downlink(
     uint16_t access_port,
     const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
 {
+    return n3iwf_dp_handle_clear_downlink_selected(
+        packet, meta, sessions, stats, access_port, access_mac, NULL);
+}
+
+int
+n3iwf_dp_handle_clear_downlink_selected(
+    struct rte_mbuf *packet,
+    struct onvm_pkt_meta *meta,
+    const struct n3iwf_dp_session_table *sessions,
+    struct n3iwf_dp_stats_wire *stats,
+    uint16_t access_port,
+    const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN],
+    const struct n3iwf_dp_session **selected_session)
+{
     const uint8_t *data;
     size_t length;
     size_t ip_length;
@@ -151,12 +174,22 @@ n3iwf_dp_handle_clear_downlink(
     if (packet == NULL || meta == NULL || sessions == NULL || stats == NULL) {
         return -EINVAL;
     }
+    if (selected_session != NULL) {
+        *selected_session = NULL;
+    }
     data = rte_pktmbuf_mtod(packet, const uint8_t *);
     length = rte_pktmbuf_pkt_len(packet);
-    if (outer_view(data, length, &ip_length, &next_header) != 0 ||
-        next_header != IPPROTO_UDP) {
-        ++stats->malformed_packets;
-        return -EPROTO;
+    {
+        int outer_result = outer_view(data, length, &ip_length, &next_header);
+
+        if (outer_result == -EINPROGRESS) {
+            ++stats->fragment_drops;
+            return outer_result;
+        }
+        if (outer_result != 0 || next_header != IPPROTO_UDP) {
+            ++stats->malformed_packets;
+            return outer_result != 0 ? outer_result : -EPROTO;
+        }
     }
     gtp_offset = sizeof(struct rte_ether_hdr) + ip_length +
                  sizeof(struct rte_udp_hdr);
@@ -171,7 +204,8 @@ n3iwf_dp_handle_clear_downlink(
         ++stats->malformed_packets;
         return -EPROTO;
     }
-    if (n3iwf_dp_gtpu_parse(data + gtp_offset, length - gtp_offset, &gtp) != 0) {
+    if (n3iwf_dp_gtpu_parse(data + gtp_offset, length - gtp_offset, &gtp) != 0 ||
+        gtp.direction != N3IWF_DP_DOWNLINK) {
         ++stats->malformed_packets;
         return -EPROTO;
     }
@@ -189,19 +223,37 @@ n3iwf_dp_handle_clear_downlink(
         ++stats->malformed_packets;
         return -EPROTO;
     }
+    if (!n3iwf_dp_inner_packet_supported(gtp.payload_len)) {
+        ++stats->oversize_drops;
+        return -EMSGSIZE;
+    }
     inner_protocol = (gtp.payload[0] >> 4) == 4 ?
                      N3IWF_DP_GRE_PROTO_IPV4 :
                      N3IWF_DP_GRE_PROTO_IPV6;
     inner_offset = gtp_offset + gtp.header_len;
     if (inner_offset > UINT16_MAX ||
-        rte_pktmbuf_adj(packet, (uint16_t)inner_offset) == NULL ||
-        prepend_clear_gre(packet, session, gtp.qfi, inner_protocol,
+        rte_pktmbuf_headroom(packet) + inner_offset <
+            sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) +
+                N3IWF_DP_GRE_KEY_HEADER_LEN +
+                N3IWF_DP_ESP_OUTBOUND_HEADROOM ||
+        rte_pktmbuf_tailroom(packet) + inner_offset <
+            sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) +
+                N3IWF_DP_GRE_KEY_HEADER_LEN +
+                N3IWF_DP_ESP_OUTBOUND_TAILROOM) {
+        ++stats->buffer_drops;
+        return -ENOSPC;
+    }
+    if (rte_pktmbuf_adj(packet, (uint16_t)inner_offset) == NULL ||
+        prepend_clear_gre(packet, session, gtp.qfi, gtp.rqi, inner_protocol,
                           access_mac) != 0) {
-        ++stats->malformed_packets;
+        ++stats->buffer_drops;
         return -ENOSPC;
     }
     meta->action = ONVM_NF_ACTION_OUT;
     meta->destination = access_port;
+    if (selected_session != NULL) {
+        *selected_session = session;
+    }
     ++stats->downlink_packets;
     return 0;
 }

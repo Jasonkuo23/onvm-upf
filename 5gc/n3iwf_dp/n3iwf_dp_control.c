@@ -95,6 +95,11 @@ send_stats(struct n3iwf_dp_control *control, int client_fd,
         host_to_be64(control->stats->access_mac_changes);
     stats.access_neighbor_drops =
         host_to_be64(control->stats->access_neighbor_drops);
+    stats.active_sessions = host_to_be64(control->sessions->count);
+    stats.active_child_sas = host_to_be64(control->child_sas->count);
+    stats.unknown_spi = host_to_be64(control->stats->unknown_spi);
+    stats.oversize_drops = host_to_be64(control->stats->oversize_drops);
+    stats.buffer_drops = host_to_be64(control->stats->buffer_drops);
     memcpy(response, &header, sizeof(header));
     memcpy(response + sizeof(header), &stats, sizeof(stats));
     (void)send(client_fd, response, sizeof(response), MSG_DONTWAIT);
@@ -162,15 +167,30 @@ handle_message(struct n3iwf_dp_control *control, const uint8_t *message,
             status = N3IWF_DP_STATUS_UNSUPPORTED;
         } else if (payload_len == sizeof(struct n3iwf_dp_session_wire)) {
             struct n3iwf_dp_session_wire wire;
+            const struct n3iwf_dp_child_sa *child;
+            uint32_t sa_index = N3IWF_DP_INVALID_SA_INDEX;
 
             memcpy(&wire, payload, sizeof(wire));
-            if (n3iwf_dp_child_sa_find_session(
-                    control->child_sas, be64_to_host(wire.ue_id),
-                    ntohl(wire.pdu_session_id)) == NULL) {
+            child = n3iwf_dp_child_sa_find_latest_for_control(
+                control->child_sas, be64_to_host(wire.ue_id),
+                ntohl(wire.pdu_session_id), &sa_index);
+            if (child == NULL) {
                 status = N3IWF_DP_STATUS_NOT_FOUND;
             } else {
                 status = n3iwf_dp_session_upsert_wire(control->sessions,
                                                        &wire, generation);
+                if (status == N3IWF_DP_STATUS_OK) {
+                    status = n3iwf_dp_session_activate_outbound_sa(
+                        control->sessions, be64_to_host(wire.ue_id),
+                        ntohl(wire.pdu_session_id), sa_index,
+                        child->generation);
+                    if (status == N3IWF_DP_STATUS_OK) {
+                        status = n3iwf_dp_child_sa_bind_session_for_control(
+                            control->child_sas, control->sessions,
+                            be64_to_host(wire.ue_id),
+                            ntohl(wire.pdu_session_id));
+                    }
+                }
             }
         }
         break;
@@ -198,9 +218,28 @@ handle_message(struct n3iwf_dp_control *control, const uint8_t *message,
             status = N3IWF_DP_STATUS_UNSUPPORTED;
         } else if (payload_len == sizeof(struct n3iwf_dp_child_sa_wire)) {
             struct n3iwf_dp_child_sa_wire wire;
+            uint32_t sa_index = N3IWF_DP_INVALID_SA_INDEX;
             memcpy(&wire, payload, sizeof(wire));
-            status = n3iwf_dp_child_sa_upsert_wire(control->child_sas, &wire,
-                                                    generation);
+            status = n3iwf_dp_child_sa_upsert_wire_at(
+                control->child_sas, &wire, generation, &sa_index);
+            if (status == N3IWF_DP_STATUS_OK) {
+                enum n3iwf_dp_status activation =
+                    n3iwf_dp_session_activate_outbound_sa(
+                        control->sessions, be64_to_host(wire.ue_id),
+                        ntohl(wire.pdu_session_id), sa_index, generation);
+                /* Child-SA programming precedes the initial PDU-session
+                 * command.  A missing session is therefore expected; the
+                 * later session upsert binds the newest installed SA. */
+                if (activation != N3IWF_DP_STATUS_OK &&
+                    activation != N3IWF_DP_STATUS_NOT_FOUND) {
+                    status = activation;
+                } else if (activation == N3IWF_DP_STATUS_OK) {
+                    status = n3iwf_dp_child_sa_bind_session_for_control(
+                        control->child_sas, control->sessions,
+                        be64_to_host(wire.ue_id),
+                        ntohl(wire.pdu_session_id));
+                }
+            }
             /* Erase the stack copy containing traffic keys immediately. */
             memset(&wire, 0, sizeof(wire));
         }
@@ -210,10 +249,20 @@ handle_message(struct n3iwf_dp_control *control, const uint8_t *message,
             status = N3IWF_DP_STATUS_UNSUPPORTED;
         } else if (payload_len == sizeof(struct n3iwf_dp_child_sa_delete_wire)) {
             struct n3iwf_dp_child_sa_delete_wire wire;
+            uint32_t sa_index = N3IWF_DP_INVALID_SA_INDEX;
             memcpy(&wire, payload, sizeof(wire));
-            status = n3iwf_dp_child_sa_delete(
+            status = n3iwf_dp_child_sa_delete_at(
                 control->child_sas, be64_to_host(wire.ue_id),
-                ntohl(wire.pdu_session_id), ntohl(wire.inbound_spi), generation);
+                ntohl(wire.pdu_session_id), ntohl(wire.inbound_spi), generation,
+                &sa_index);
+            if (status == N3IWF_DP_STATUS_OK) {
+                /* Normally overlap retirement deletes the inactive old SA.
+                 * If control deletes the selected SA, fail closed rather
+                 * than silently falling back to an older generation. */
+                n3iwf_dp_session_clear_outbound_sa(
+                    control->sessions, be64_to_host(wire.ue_id),
+                    ntohl(wire.pdu_session_id), sa_index);
+            }
         }
         break;
     default:

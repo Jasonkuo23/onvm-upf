@@ -24,6 +24,8 @@ test_route_selection(void)
     assert(!upf_u_n3iwf_peer_matches(true, 0, 0));
     assert(!upf_u_n3iwf_peer_matches(true, UINT32_C(1), UINT32_C(2)));
     assert(upf_u_n3iwf_peer_matches(true, UINT32_C(1), UINT32_C(1)));
+    assert(upf_u_n3iwf_dl_pdu_session_information(9, false) == 0x09U);
+    assert(upf_u_n3iwf_dl_pdu_session_information(9, true) == 0x49U);
 
     upf_u_n3iwf_set_route(&meta, true, 14, 0);
     assert(meta.action == ONVM_NF_ACTION_TONF);

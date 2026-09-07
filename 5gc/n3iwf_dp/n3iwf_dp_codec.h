@@ -8,6 +8,7 @@
 #ifndef N3IWF_DP_CODEC_H
 #define N3IWF_DP_CODEC_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -26,6 +27,7 @@ enum n3iwf_dp_direction {
 struct n3iwf_dp_gtpu_view {
     uint32_t teid;
     uint8_t qfi;
+    bool rqi;
     enum n3iwf_dp_direction direction;
     const uint8_t *payload;
     size_t payload_len;
@@ -36,6 +38,7 @@ struct n3iwf_dp_gre_view {
     uint16_t protocol;
     uint32_t key;
     uint8_t qfi;
+    bool rqi;
     const uint8_t *payload;
     size_t payload_len;
     size_t header_len;
@@ -47,24 +50,29 @@ struct n3iwf_dp_gre_view {
  */
 int
 n3iwf_dp_gtpu_build(uint8_t *out, size_t capacity, uint32_t teid, uint8_t qfi,
-                    enum n3iwf_dp_direction direction, const uint8_t *payload,
-                    size_t payload_len, size_t *encoded_len);
+                    bool rqi, enum n3iwf_dp_direction direction,
+                    const uint8_t *payload, size_t payload_len,
+                    size_t *encoded_len);
 
 int
 n3iwf_dp_gtpu_parse(const uint8_t *packet, size_t packet_len,
                     struct n3iwf_dp_gtpu_view *view);
 
 /*
- * The GRE Key field carries QFI in its least-significant six bits. The full
- * key is returned so future Release 18 key bits can be preserved.
+ * TS 24.502 section 9.3.3 carries QFI in bits 24..29 and downlink RQI in bit
+ * 7 of the 32-bit GRE Key field. Direction is explicit so an uplink caller
+ * cannot accidentally originate or accept RQI, which is defined only for a
+ * downlink user-data packet. Reserved key bits are rejected.
  */
 int
 n3iwf_dp_gre_build(uint8_t *out, size_t capacity, uint16_t protocol,
-                   uint32_t key, const uint8_t *payload, size_t payload_len,
-                   size_t *encoded_len);
+                   uint8_t qfi, bool rqi,
+                   enum n3iwf_dp_direction direction, const uint8_t *payload,
+                   size_t payload_len, size_t *encoded_len);
 
 int
 n3iwf_dp_gre_parse(const uint8_t *packet, size_t packet_len,
+                   enum n3iwf_dp_direction direction,
                    struct n3iwf_dp_gre_view *view);
 
 #endif

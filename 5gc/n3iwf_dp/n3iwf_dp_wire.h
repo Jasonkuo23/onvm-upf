@@ -154,6 +154,11 @@ struct n3iwf_dp_stats_wire {
     uint64_t access_mac_learns;
     uint64_t access_mac_changes;
     uint64_t access_neighbor_drops;
+    uint64_t active_sessions;
+    uint64_t active_child_sas;
+    uint64_t unknown_spi;
+    uint64_t oversize_drops;
+    uint64_t buffer_drops;
 } __attribute__((packed));
 
 int

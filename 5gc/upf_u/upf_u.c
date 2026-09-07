@@ -427,8 +427,12 @@ Encap(struct rte_mbuf *pkt, UPDK_FAR *far, UPDK_QER *qer) {
             rte_pktmbuf_mtod_offset(pkt, pdu_sess_container_hdr_t *,
                         sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + sizeof(gtpv1_t) +
                         sizeof(gtpv1_hdr_opt_t));
+        uint16_t dl_pdu_session_information =
+            upf_u_n3iwf_dl_pdu_session_information(
+                QERGetQFI(qer), QERGetRQI(qer) != 0);
         pdu_ss_ctr->length = 0x01;
-        pdu_ss_ctr->pdu_sess_ctr = rte_cpu_to_be_16(QERGetQFI(qer));
+        pdu_ss_ctr->pdu_sess_ctr =
+            rte_cpu_to_be_16(dl_pdu_session_information);
         pdu_ss_ctr->next_hdr = 0x00;
     }
 
@@ -438,6 +442,7 @@ Encap(struct rte_mbuf *pkt, UPDK_FAR *far, UPDK_QER *qer) {
                               // udppayloadlen should be raw + gtp header
 
     struct rte_ipv4_hdr *ipv4_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, 0);
+    memset(ipv4_hdr, 0, sizeof(*ipv4_hdr));
     onvm_pkt_fill_ipv4(ipv4_hdr, rte_cpu_to_be_32(g_n3_ip_be), rte_cpu_to_be_32(outerHeaderCreation->ipv4.s_addr),
                IPPROTO_UDP);
     ipv4_hdr->total_length = rte_cpu_to_be_16(payloadLen + sizeof(gtpv1_t) + sizeof(struct rte_udp_hdr) +

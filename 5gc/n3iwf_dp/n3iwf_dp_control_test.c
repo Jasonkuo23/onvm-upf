@@ -123,7 +123,8 @@ build_stats_get(uint8_t *message, size_t capacity, uint32_t xid)
 
 static size_t
 build_child_sa_upsert(uint8_t *message, size_t capacity, uint32_t xid,
-                      uint64_t generation)
+                      uint64_t generation, uint32_t inbound_spi,
+                      uint32_t outbound_spi)
 {
     struct n3iwf_dp_wire_header header = {0};
     struct n3iwf_dp_child_sa_wire sa = {0};
@@ -137,8 +138,8 @@ build_child_sa_upsert(uint8_t *message, size_t capacity, uint32_t xid,
     header.generation = to_be64(generation);
     sa.ue_id = to_be64(42);
     sa.pdu_session_id = htonl(10);
-    sa.inbound_spi = htonl(1001);
-    sa.outbound_spi = htonl(1002);
+    sa.inbound_spi = htonl(inbound_spi);
+    sa.outbound_spi = htonl(outbound_spi);
     sa.encryption_id = htons(12);
     sa.integrity_id = htons(2);
     sa.replay_window = htonl(64);
@@ -155,6 +156,29 @@ build_child_sa_upsert(uint8_t *message, size_t capacity, uint32_t xid,
     memcpy(message, &header, sizeof(header));
     memcpy(message + sizeof(header), &sa, sizeof(sa));
     memset(&sa, 0, sizeof(sa));
+    return total;
+}
+
+static size_t
+build_child_sa_delete(uint8_t *message, size_t capacity, uint32_t xid,
+                      uint64_t generation, uint32_t inbound_spi)
+{
+    struct n3iwf_dp_wire_header header = {0};
+    struct n3iwf_dp_child_sa_delete_wire sa = {0};
+    size_t total = sizeof(header) + sizeof(sa);
+
+    assert(capacity >= total);
+    header.magic = htonl(N3IWF_DP_WIRE_MAGIC);
+    header.version = htons(N3IWF_DP_WIRE_VERSION);
+    header.type = htons(N3IWF_DP_MSG_CHILD_SA_DELETE);
+    header.length = htonl((uint32_t)total);
+    header.transaction_id = htonl(xid);
+    header.generation = to_be64(generation);
+    sa.ue_id = to_be64(42);
+    sa.pdu_session_id = htonl(10);
+    sa.inbound_spi = htonl(inbound_spi);
+    memcpy(message, &header, sizeof(header));
+    memcpy(message + sizeof(header), &sa, sizeof(sa));
     return total;
 }
 
@@ -229,7 +253,8 @@ main(void)
     assert(response_status(response, (size_t)response_len, 20) ==
            N3IWF_DP_STATUS_CAPACITY);
 
-    request_len = build_child_sa_upsert(request, sizeof(request), 3, 1);
+    request_len = build_child_sa_upsert(request, sizeof(request), 3, 1,
+                                        1001, 1002);
     assert(send(observer_sockets[1], request, request_len, 0) ==
            (ssize_t)request_len);
     assert(n3iwf_dp_control_poll(&control) == 0);
@@ -238,7 +263,8 @@ main(void)
            N3IWF_DP_STATUS_UNSUPPORTED);
     assert(child_sas.count == 0);
 
-    request_len = build_child_sa_upsert(request, sizeof(request), 4, 1);
+    request_len = build_child_sa_upsert(request, sizeof(request), 4, 1,
+                                        1001, 1002);
     assert(send(sockets[1], request, request_len, 0) == (ssize_t)request_len);
     assert(n3iwf_dp_control_poll(&control) == 0);
     response_len = recv(sockets[1], response, sizeof(response), 0);
@@ -246,21 +272,82 @@ main(void)
            N3IWF_DP_STATUS_OK);
     assert(child_sas.count == 1);
 
-    request_len = build_upsert(request, sizeof(request), 7, 1);
+    request_len = build_upsert(request, sizeof(request), 7, 2);
     assert(send(sockets[1], request, request_len, 0) == (ssize_t)request_len);
     assert(n3iwf_dp_control_poll(&control) == 0);
     response_len = recv(sockets[1], response, sizeof(response), 0);
     assert(response_status(response, (size_t)response_len, 7) ==
            N3IWF_DP_STATUS_OK);
     assert(table.count == 1);
+    {
+        const struct n3iwf_dp_child_sa *child =
+            n3iwf_dp_child_sa_find_inbound(&child_sas, 1001);
+        const struct n3iwf_dp_session *bound =
+            n3iwf_dp_child_sa_get_bound_session(child, &table);
 
-    request_len = build_upsert(request, sizeof(request), 8, 1);
+        assert(bound != NULL && bound->ue_id == 42 &&
+               bound->pdu_session_id == 10);
+    }
+
+    request_len = build_upsert(request, sizeof(request), 8, 2);
     assert(send(sockets[1], request, request_len, 0) == (ssize_t)request_len);
     assert(n3iwf_dp_control_poll(&control) == 0);
     response_len = recv(sockets[1], response, sizeof(response), 0);
     assert(response_status(response, (size_t)response_len, 8) ==
            N3IWF_DP_STATUS_STALE_GENERATION);
     assert(stats.stale_updates == 1);
+
+    request_len = build_child_sa_upsert(request, sizeof(request), 10, 3,
+                                        2001, 2002);
+    assert(send(sockets[1], request, request_len, 0) == (ssize_t)request_len);
+    assert(n3iwf_dp_control_poll(&control) == 0);
+    response_len = recv(sockets[1], response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 10) ==
+           N3IWF_DP_STATUS_OK);
+    assert(child_sas.count == 2);
+    {
+        const struct n3iwf_dp_session *session =
+            n3iwf_dp_session_find_downlink(&table, 200, 5);
+        const struct n3iwf_dp_child_sa *old =
+            n3iwf_dp_child_sa_find_inbound(&child_sas, 1001);
+        const struct n3iwf_dp_child_sa *replacement =
+            n3iwf_dp_child_sa_find_inbound(&child_sas, 2001);
+        const struct n3iwf_dp_child_sa *active =
+            n3iwf_dp_child_sa_get_active_outbound(&child_sas, session, NULL);
+        assert(active != NULL &&
+               ntohl(active->parameters.inbound_spi) == 2001);
+        assert(n3iwf_dp_child_sa_get_bound_session(old, &table) == session);
+        assert(n3iwf_dp_child_sa_get_bound_session(replacement, &table) ==
+               session);
+    }
+
+    request_len = build_child_sa_delete(request, sizeof(request), 11, 4,
+                                        1001);
+    assert(send(sockets[1], request, request_len, 0) == (ssize_t)request_len);
+    assert(n3iwf_dp_control_poll(&control) == 0);
+    response_len = recv(sockets[1], response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 11) ==
+           N3IWF_DP_STATUS_OK);
+    assert(child_sas.count == 1 && table.count == 1);
+    assert(n3iwf_dp_child_sa_find_inbound(&child_sas, 1001) == NULL);
+    assert(n3iwf_dp_child_sa_find_inbound(&child_sas, 2001) != NULL);
+    {
+        const struct n3iwf_dp_session *session =
+            n3iwf_dp_session_find_downlink(&table, 200, 5);
+        const struct n3iwf_dp_child_sa *active =
+            n3iwf_dp_child_sa_get_active_outbound(&child_sas, session, NULL);
+        assert(active != NULL &&
+               ntohl(active->parameters.inbound_spi) == 2001);
+    }
+
+    request_len = build_child_sa_upsert(request, sizeof(request), 12, 4,
+                                        1001, 1002);
+    assert(send(sockets[1], request, request_len, 0) == (ssize_t)request_len);
+    assert(n3iwf_dp_control_poll(&control) == 0);
+    response_len = recv(sockets[1], response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 12) ==
+           N3IWF_DP_STATUS_STALE_GENERATION);
+    assert(stats.stale_updates == 2);
 
     stats.uplink_packets = 11;
     stats.downlink_packets = 12;
@@ -276,6 +363,9 @@ main(void)
     stats.access_mac_learns = 23;
     stats.access_mac_changes = 24;
     stats.access_neighbor_drops = 25;
+    stats.unknown_spi = 26;
+    stats.oversize_drops = 27;
+    stats.buffer_drops = 28;
     request_len = build_stats_get(request, sizeof(request), 9);
     assert(send(observer_sockets[1], request, request_len, 0) ==
            (ssize_t)request_len);
@@ -294,13 +384,18 @@ main(void)
     assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 40) == 16);
     assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 48) == 17);
     assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 56) == 18);
-    assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 64) == 1);
+    assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 64) == 2);
     assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 72) == 20);
     assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 80) == 21);
     assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 88) == 22);
     assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 96) == 23);
     assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 104) == 24);
     assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 112) == 25);
+    assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 120) == 1);
+    assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 128) == 1);
+    assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 136) == 26);
+    assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 144) == 27);
+    assert(read_be64(response + sizeof(struct n3iwf_dp_wire_header) + 152) == 28);
 
     close(sockets[0]);
     close(sockets[1]);

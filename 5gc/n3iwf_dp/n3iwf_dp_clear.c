@@ -6,6 +6,7 @@
 
 #include "n3iwf_dp_codec.h"
 #include "n3iwf_dp_downlink.h"
+#include "n3iwf_dp_mtu.h"
 
 #include <errno.h>
 #include <netinet/in.h>
@@ -109,7 +110,7 @@ prepend_gtpu(struct rte_mbuf *packet, const struct n3iwf_dp_session *session,
         return -EMSGSIZE;
     }
     if (n3iwf_dp_gtpu_build(gtpu_header, sizeof(gtpu_header),
-                            session->uplink_teid, qfi, N3IWF_DP_UPLINK,
+                            session->uplink_teid, qfi, false, N3IWF_DP_UPLINK,
                             NULL, 0, &gtpu_len) != 0) {
         return -EINVAL;
     }
@@ -147,6 +148,7 @@ prepend_gtpu(struct rte_mbuf *packet, const struct n3iwf_dp_session *session,
 static int
 handle_uplink(struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
               struct n3iwf_dp_session_table *sessions,
+              struct n3iwf_dp_session *authenticated_session,
               struct n3iwf_dp_stats_wire *stats, uint16_t upf_service_id,
               const struct l3_view *outer,
               const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
@@ -160,24 +162,48 @@ handle_uplink(struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
     size_t inner_offset;
 
     if (n3iwf_dp_gre_parse(data + gre_offset,
-                           rte_pktmbuf_pkt_len(packet) - gre_offset, &gre) != 0) {
+                           rte_pktmbuf_pkt_len(packet) - gre_offset,
+                           N3IWF_DP_UPLINK, &gre) != 0) {
         ++stats->malformed_packets;
         return -EINVAL;
     }
     /* N3IWF learns the authenticated UE NWu address during IKE, not the PDU
      * address inside NAS. Clear mode uses NWu source plus QFI as the test-only
      * equivalent of the production Child-SA SPI plus QFI lookup. */
-    session = n3iwf_dp_session_find_uplink_mutable(
-        sessions, outer->family, outer->source, gre.qfi);
+    if (authenticated_session != NULL) {
+        size_t length = outer->family == N3IWF_DP_AF_IPV4 ? 4U : 16U;
+
+        session = authenticated_session;
+        if (session->address_family != outer->family ||
+            memcmp(session->ue_nwu_address, outer->source, length) != 0 ||
+            !n3iwf_dp_session_allows_qfi(session, gre.qfi)) {
+            session = NULL;
+        }
+    } else {
+        session = n3iwf_dp_session_find_uplink_mutable(
+            sessions, outer->family, outer->source, gre.qfi);
+    }
     if (session == NULL) {
         ++stats->unknown_qfi;
         return -ENOENT;
+    }
+    if (!n3iwf_dp_inner_packet_supported(gre.payload_len)) {
+        ++stats->oversize_drops;
+        return -EMSGSIZE;
     }
     if (access_mac == NULL ||
         memcmp(ether->dst_addr.addr_bytes, access_mac,
                N3IWF_DP_ETHER_ADDR_LEN) != 0) {
         ++stats->access_neighbor_drops;
         return -EHOSTUNREACH;
+    }
+    inner_offset = gre_offset + gre.header_len;
+    if (inner_offset > UINT16_MAX ||
+        rte_pktmbuf_headroom(packet) + inner_offset <
+            sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) +
+                sizeof(struct rte_udp_hdr) + N3IWF_DP_GTPU_PSC_HEADER_LEN) {
+        ++stats->buffer_drops;
+        return -ENOSPC;
     }
     learn_result = n3iwf_dp_session_learn_access_mac(
         session, ether->src_addr.addr_bytes);
@@ -190,11 +216,9 @@ handle_uplink(struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
     } else if (learn_result == N3IWF_DP_MAC_CHANGED) {
         ++stats->access_mac_changes;
     }
-    inner_offset = gre_offset + gre.header_len;
-    if (inner_offset > UINT16_MAX ||
-        rte_pktmbuf_adj(packet, (uint16_t)inner_offset) == NULL ||
+    if (rte_pktmbuf_adj(packet, (uint16_t)inner_offset) == NULL ||
         prepend_gtpu(packet, session, gre.qfi) != 0) {
-        ++stats->malformed_packets;
+        ++stats->buffer_drops;
         return -ENOSPC;
     }
     meta->action = ONVM_NF_ACTION_TONF;
@@ -233,8 +257,8 @@ n3iwf_dp_handle_clear_packet(
         return parse_result;
     }
     if (l3.next_header == IPPROTO_GRE) {
-        return handle_uplink(packet, meta, sessions, stats, upf_service_id,
-                             &l3, access_mac);
+        return handle_uplink(packet, meta, sessions, NULL, stats,
+                             upf_service_id, &l3, access_mac);
     }
     if (l3.next_header == IPPROTO_UDP) {
         return n3iwf_dp_handle_clear_downlink(packet, meta, sessions, stats,
@@ -242,4 +266,34 @@ n3iwf_dp_handle_clear_packet(
     }
     ++stats->malformed_packets;
     return -EPROTONOSUPPORT;
+}
+
+int
+n3iwf_dp_handle_authenticated_uplink(
+    struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
+    struct n3iwf_dp_session *session, struct n3iwf_dp_stats_wire *stats,
+    uint16_t upf_service_id,
+    const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
+{
+    const uint8_t *data;
+    struct l3_view l3;
+    int parse_result;
+
+    if (packet == NULL || meta == NULL || session == NULL || stats == NULL ||
+        upf_service_id == 0) {
+        return -EINVAL;
+    }
+    meta->action = ONVM_NF_ACTION_DROP;
+    data = rte_pktmbuf_mtod(packet, const uint8_t *);
+    parse_result = parse_l3(data, rte_pktmbuf_pkt_len(packet), &l3);
+    if (parse_result == -EINPROGRESS) {
+        ++stats->fragment_drops;
+        return parse_result;
+    }
+    if (parse_result != 0 || l3.next_header != IPPROTO_GRE) {
+        ++stats->malformed_packets;
+        return parse_result != 0 ? parse_result : -EPROTONOSUPPORT;
+    }
+    return handle_uplink(packet, meta, NULL, session, stats, upf_service_id,
+                         &l3, access_mac);
 }

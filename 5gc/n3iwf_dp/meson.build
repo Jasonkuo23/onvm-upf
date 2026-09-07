@@ -5,6 +5,7 @@ sources = files(
     'n3iwf_dp_codec.c',
     'n3iwf_dp_control.c',
     'n3iwf_dp_downlink.c',
+    'n3iwf_dp_ipsec.c',
     'n3iwf_dp_punt.c',
     'n3iwf_dp_session.c',
     'n3iwf_dp_wire.c'
@@ -23,7 +24,8 @@ session_test = executable('n3iwf_dp_session_test',
 test('n3iwf-dp-session', session_test)
 
 child_sa_test = executable('n3iwf_dp_child_sa_test',
-    files('n3iwf_dp_child_sa.c', 'n3iwf_dp_child_sa_test.c'),
+    files('n3iwf_dp_child_sa.c', 'n3iwf_dp_session.c',
+          'n3iwf_dp_child_sa_test.c'),
     native: true
 )
 test('n3iwf-dp-child-sa', child_sa_test)

@@ -282,10 +282,20 @@ for dev in $ALLOW_LIST; do
     allow_args+=(--allow "$dev")
 done
 
+crypto_vdev_args=()
+if [[ -n ${ONVM_CRYPTO_VDEV:-} ]]; then
+    if [[ ! $ONVM_CRYPTO_VDEV =~ ^crypto_[[:alnum:]_]+[[:alnum:]]*(,[[:alnum:]_]+=[[:alnum:]]+)*$ ]]; then
+        echo "Invalid ONVM_CRYPTO_VDEV: $ONVM_CRYPTO_VDEV" >&2
+        exit 1
+    fi
+    crypto_vdev_args+=(--vdev "$ONVM_CRYPTO_VDEV")
+fi
+
 # echo "Using PCI allow list: ${allow_args[*]}"
 sudo ./build/onvm/onvm_mgr/onvm_mgr \
     -l "$cpu" -n 4 --proc-type=primary \
     "${allow_args[@]}" \
+    "${crypto_vdev_args[@]}" \
     ${virt_addr} \
     -- -p ${ports} -n ${nf_cores} ${num_srvc} ${def_srvc} ${port_service_map} ${stats} ${stats_sleep_time} ${verbosity_level} ${ttl} ${packet_limit} ${shared_cpu_flag} ${jumbo_frames_flag}
 

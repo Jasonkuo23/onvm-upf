@@ -11,6 +11,12 @@
 #include <rte_ether.h>
 #include <rte_ip.h>
 
+uint16_t
+upf_u_n3iwf_dl_pdu_session_information(uint8_t qfi, bool rqi)
+{
+    return (uint16_t)(qfi & 0x3fU) | (rqi ? UINT16_C(0x40) : 0);
+}
+
 bool
 upf_u_n3iwf_peer_matches(bool enabled, uint32_t configured_peer_ip_be,
                           uint32_t packet_peer_ip_be)

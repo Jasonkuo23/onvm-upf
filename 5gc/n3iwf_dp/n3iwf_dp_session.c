@@ -100,11 +100,40 @@ find_identity(const struct n3iwf_dp_session_table *table, uint64_t ue_id,
     return -1;
 }
 
+static int
+find_downlink_teid(const struct n3iwf_dp_session_table *table, uint32_t teid)
+{
+    uint32_t hash = hash_teid(teid);
+    size_t probe;
+
+    for (probe = 0; probe < N3IWF_DP_INDEX_SIZE; ++probe) {
+        size_t slot = (hash + probe) & (N3IWF_DP_INDEX_SIZE - 1U);
+        uint32_t value = table->downlink_index[slot];
+
+        if (value == 0) {
+            return -1;
+        }
+        if (value != N3IWF_DP_INDEX_TOMBSTONE &&
+            table->entries[value - 1U].used &&
+            table->entries[value - 1U].downlink_teid == teid) {
+            return (int)(value - 1U);
+        }
+    }
+    return -1;
+}
+
 static bool
 qfi_allowed(const struct n3iwf_dp_session *session, uint8_t qfi)
 {
     return qfi > 0 && qfi <= N3IWF_DP_MAX_QFI &&
            (session->qfi_bitmap & (UINT64_C(1) << qfi)) != 0;
+}
+
+bool
+n3iwf_dp_session_allows_qfi(const struct n3iwf_dp_session *session,
+                            uint8_t qfi)
+{
+    return session != NULL && session->used && qfi_allowed(session, qfi);
 }
 
 static bool
@@ -150,6 +179,7 @@ n3iwf_dp_session_upsert_wire(struct n3iwf_dp_session_table *table,
     ue_id = be64_to_host(wire->ue_id);
     pdu_session_id = ntohl(wire->pdu_session_id);
     candidate.used = true;
+    candidate.active_outbound_sa_index = N3IWF_DP_INVALID_SA_INDEX;
     candidate.generation = generation;
     candidate.ue_id = ue_id;
     candidate.pdu_session_id = pdu_session_id;
@@ -184,6 +214,13 @@ n3iwf_dp_session_upsert_wire(struct n3iwf_dp_session_table *table,
     if (existing >= 0 && generation <= table->entries[existing].generation) {
         return N3IWF_DP_STATUS_STALE_GENERATION;
     }
+    {
+        int teid_owner = find_downlink_teid(table, candidate.downlink_teid);
+
+        if (teid_owner >= 0 && teid_owner != existing) {
+            return N3IWF_DP_STATUS_BAD_MESSAGE;
+        }
+    }
     if (existing < 0) {
         for (i = 0; i < N3IWF_DP_MAX_SESSIONS; ++i) {
             if (!table->entries[i].used) {
@@ -195,7 +232,17 @@ n3iwf_dp_session_upsert_wire(struct n3iwf_dp_session_table *table,
             return N3IWF_DP_STATUS_CAPACITY;
         }
         existing = free_entry;
+        if (table->next_slot_generation == UINT64_MAX) {
+            return N3IWF_DP_STATUS_CAPACITY;
+        }
+        ++table->next_slot_generation;
+        candidate.slot_generation = table->next_slot_generation;
     } else {
+        candidate.slot_generation = table->entries[existing].slot_generation;
+        candidate.active_outbound_sa_index =
+            table->entries[existing].active_outbound_sa_index;
+        candidate.active_outbound_sa_generation =
+            table->entries[existing].active_outbound_sa_generation;
         if (table->entries[existing].address_family ==
                 candidate.address_family &&
             memcmp(table->entries[existing].ue_nwu_address,
@@ -227,6 +274,75 @@ n3iwf_dp_session_upsert_wire(struct n3iwf_dp_session_table *table,
         ++table->count;
     }
     return N3IWF_DP_STATUS_OK;
+}
+
+const struct n3iwf_dp_session *
+n3iwf_dp_session_find_identity_for_control(
+    const struct n3iwf_dp_session_table *table, uint64_t ue_id,
+    uint32_t pdu_session_id, uint32_t *session_index)
+{
+    int entry;
+
+    if (table == NULL || pdu_session_id == 0) {
+        return NULL;
+    }
+    entry = find_identity(table, ue_id, pdu_session_id);
+    if (entry < 0) {
+        return NULL;
+    }
+    if (session_index != NULL) {
+        *session_index = (uint32_t)entry;
+    }
+    return &table->entries[entry];
+}
+
+enum n3iwf_dp_status
+n3iwf_dp_session_activate_outbound_sa(
+    struct n3iwf_dp_session_table *table, uint64_t ue_id,
+    uint32_t pdu_session_id, uint32_t sa_index, uint64_t sa_generation)
+{
+    struct n3iwf_dp_session *session;
+    int entry;
+
+    if (table == NULL || sa_index == N3IWF_DP_INVALID_SA_INDEX ||
+        sa_generation == 0) {
+        return N3IWF_DP_STATUS_BAD_MESSAGE;
+    }
+    entry = find_identity(table, ue_id, pdu_session_id);
+    if (entry < 0) {
+        return N3IWF_DP_STATUS_NOT_FOUND;
+    }
+    session = &table->entries[entry];
+    if (session->active_outbound_sa_index != N3IWF_DP_INVALID_SA_INDEX) {
+        if (sa_generation < session->active_outbound_sa_generation ||
+            (sa_generation == session->active_outbound_sa_generation &&
+             sa_index != session->active_outbound_sa_index)) {
+            return N3IWF_DP_STATUS_STALE_GENERATION;
+        }
+    }
+    session->active_outbound_sa_index = sa_index;
+    session->active_outbound_sa_generation = sa_generation;
+    return N3IWF_DP_STATUS_OK;
+}
+
+void
+n3iwf_dp_session_clear_outbound_sa(struct n3iwf_dp_session_table *table,
+                                   uint64_t ue_id,
+                                   uint32_t pdu_session_id,
+                                   uint32_t sa_index)
+{
+    int entry;
+
+    if (table == NULL) {
+        return;
+    }
+    entry = find_identity(table, ue_id, pdu_session_id);
+    if (entry >= 0 &&
+        table->entries[entry].active_outbound_sa_index == sa_index) {
+        table->entries[entry].active_outbound_sa_index =
+            N3IWF_DP_INVALID_SA_INDEX;
+        table->entries[entry].active_outbound_sa_generation = 0;
+    }
 }
 
 struct n3iwf_dp_session *

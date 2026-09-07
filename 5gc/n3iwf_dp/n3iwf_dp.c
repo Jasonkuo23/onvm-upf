@@ -10,6 +10,7 @@
 
 #include "n3iwf_dp_clear.h"
 #include "n3iwf_dp_control.h"
+#include "n3iwf_dp_ipsec.h"
 #include "n3iwf_dp_punt.h"
 #include "n3iwf_dp_session.h"
 
@@ -41,11 +42,13 @@ struct n3iwf_dp_state {
     struct n3iwf_dp_child_sa_table child_sas;
     struct n3iwf_dp_control control;
     struct n3iwf_dp_punt punt;
+    struct n3iwf_dp_ipsec ipsec;
     struct n3iwf_dp_stats_wire stats;
     struct rte_mempool *pktmbuf_pool;
     uint16_t upf_service_id;
     uint16_t access_port;
     bool cleartext_test;
+    bool software_ipsec;
     bool punt_enabled;
     bool allow_kernel_signalling_esp;
     char control_socket[108];
@@ -59,10 +62,11 @@ usage(const char *program)
 {
     printf("Usage: %s [DPDK args] -- [ONVM args] -- "
            "[-c socket] [-s upf-service] [-a access-port] "
-           "[-p tap -i NWu-IPv4] [-k] [-t]\n", program);
+           "[-p tap -i NWu-IPv4] [-k] [-t|-e]\n", program);
     puts("  -p/-i enable the strict ARP/IKE TAP control-packet boundary");
     puts("  -k also punts kernel signalling ESP (temporary transition only)");
     puts("  -t enables clear-GRE test mode; without it user traffic is dropped");
+    puts("  -e enables fail-closed DPDK software IPsec (AES-CBC/SHA1-96)");
 }
 
 static int
@@ -71,7 +75,7 @@ parse_args(int argc, char **argv, struct n3iwf_dp_state *state)
     int option;
 
     optind = 1;
-    while ((option = getopt(argc, argv, "c:s:a:p:i:kth")) != -1) {
+    while ((option = getopt(argc, argv, "c:s:a:p:i:kteh")) != -1) {
         switch (option) {
         case 'c':
             if (strlen(optarg) >= sizeof(state->control_socket)) {
@@ -106,6 +110,9 @@ parse_args(int argc, char **argv, struct n3iwf_dp_state *state)
         case 't':
             state->cleartext_test = true;
             break;
+        case 'e':
+            state->software_ipsec = true;
+            break;
         case 'h':
         default:
             usage(argv[0]);
@@ -113,6 +120,9 @@ parse_args(int argc, char **argv, struct n3iwf_dp_state *state)
         }
     }
     if ((state->punt_ifname[0] == '\0') != (state->nwu_ipv4[0] == '\0')) {
+        return -1;
+    }
+    if (state->cleartext_test && state->software_ipsec) {
         return -1;
     }
     return 0;
@@ -162,13 +172,34 @@ packet_handler(struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
                struct onvm_nf_local_ctx *local_context)
 {
     struct n3iwf_dp_state *state = local_context->nf->data;
+    int ipsec_result;
 
     meta->action = ONVM_NF_ACTION_DROP;
+    if (state->software_ipsec) {
+        ipsec_result = n3iwf_dp_handle_ipsec_packet(
+            packet, meta, &state->sessions, &state->child_sas,
+            &state->ipsec, &state->stats, state->upf_service_id,
+            state->access_port, state->access_mac);
+        if (ipsec_result != -EPROTONOSUPPORT && ipsec_result != -ENOENT) {
+            return 0;
+        }
+        /* IKE and the signalling Child SA remain on the temporary kernel
+         * boundary. Only packets not owned by a programmed user-plane SA
+         * are eligible for that punt. */
+        if (punt_packet_to_cp(packet, state) != N3IWF_DP_PUNT_NONE) {
+            return 0;
+        }
+        if (ipsec_result == -ENOENT) {
+            ++state->stats.unknown_spi;
+        }
+        ++state->stats.crypto_failures;
+        return 0;
+    }
     if (punt_packet_to_cp(packet, state) != N3IWF_DP_PUNT_NONE) {
         return 0;
     }
     if (!state->cleartext_test) {
-        /* Never forward clear user traffic when IPsec is unavailable. */
+        /* Unknown/non-IPsec user traffic remains fail-closed. */
         ++state->stats.crypto_failures;
         return 0;
     }
@@ -245,6 +276,9 @@ periodic_action(struct onvm_nf_local_ctx *local_context)
     struct n3iwf_dp_state *state = local_context->nf->data;
 
     (void)n3iwf_dp_control_poll(&state->control);
+    if (state->software_ipsec) {
+        n3iwf_dp_ipsec_reconcile(&state->ipsec, &state->child_sas);
+    }
     return_control_packets(local_context, state);
     return 0;
 }
@@ -296,7 +330,7 @@ main(int argc, char **argv)
         onvm_nflib_stop(local_context);
         return EXIT_FAILURE;
     }
-    if (state->cleartext_test) {
+    if (state->cleartext_test || state->software_ipsec) {
         struct rte_ether_addr access_mac;
 
         if (!rte_eth_dev_is_valid_port(state->access_port) ||
@@ -308,6 +342,10 @@ main(int argc, char **argv)
         }
         memcpy(state->access_mac, access_mac.addr_bytes,
                sizeof(state->access_mac));
+    }
+    if (state->software_ipsec && n3iwf_dp_ipsec_init(&state->ipsec) != 0) {
+        rte_exit(EXIT_FAILURE,
+                 "No software cryptodev supports AES-CBC-128/256 with HMAC-SHA1-96\n");
     }
     if (n3iwf_dp_control_open(&state->control, state->control_socket,
                               &state->sessions, &state->child_sas,
@@ -334,7 +372,8 @@ main(int argc, char **argv)
     printf("N3IWF-DP control=%s upf_service=%u access_port=%u mode=%s "
            "cp_tap=%s kernel_signalling_esp=%s access_mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
            state->control_socket, state->upf_service_id, state->access_port,
-           state->cleartext_test ? "cleartext-test" : "fail-closed",
+           state->cleartext_test ? "cleartext-test" :
+           (state->software_ipsec ? "software-ipsec" : "fail-closed"),
            state->punt_enabled ? state->punt.ifname : "disabled",
            state->allow_kernel_signalling_esp ? "enabled" : "disabled",
            state->access_mac[0], state->access_mac[1], state->access_mac[2],
@@ -342,6 +381,7 @@ main(int argc, char **argv)
     onvm_nflib_run(local_context);
 
     n3iwf_dp_control_close(&state->control);
+    n3iwf_dp_ipsec_close(&state->ipsec);
     n3iwf_dp_child_sa_table_clear(&state->child_sas);
     n3iwf_dp_punt_close(&state->punt);
     rte_free(state);
