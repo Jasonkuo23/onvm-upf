@@ -23,10 +23,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <rte_cycles.h>
+#include <rte_ethdev.h>
 #include <rte_malloc.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
-#include <rte_ethdev.h>
 
 #include "onvm_nflib.h"
 
@@ -36,6 +37,7 @@
 #define DEFAULT_ACCESS_PORT 0U
 #define CONTROL_FRAME_CAPACITY 4096U
 #define CONTROL_RX_BURST 32U
+#define AUX_POLL_INTERVAL_US 100U
 
 struct n3iwf_dp_state {
     struct n3iwf_dp_session_table sessions;
@@ -51,6 +53,8 @@ struct n3iwf_dp_state {
     bool software_ipsec;
     bool punt_enabled;
     bool allow_kernel_signalling_esp;
+    uint64_t last_aux_poll_cycles;
+    uint64_t aux_poll_interval_cycles;
     char control_socket[108];
     char punt_ifname[IF_NAMESIZE];
     char nwu_ipv4[INET_ADDRSTRLEN];
@@ -274,6 +278,17 @@ static int
 periodic_action(struct onvm_nf_local_ctx *local_context)
 {
     struct n3iwf_dp_state *state = local_context->nf->data;
+    uint64_t now = rte_get_timer_cycles();
+
+    /* onvm_nflib invokes user_actions on every busy-loop iteration.  The
+     * control socket and TAP are nonblocking, but polling them every iteration
+     * still enters the kernel several times per empty dataplane loop.  Bound
+     * that auxiliary work without adding sleeps to packet processing. */
+    if (now - state->last_aux_poll_cycles <
+        state->aux_poll_interval_cycles) {
+        return 0;
+    }
+    state->last_aux_poll_cycles = now;
 
     (void)n3iwf_dp_control_poll(&state->control);
     if (state->software_ipsec) {
@@ -320,6 +335,11 @@ main(int argc, char **argv)
     state->upf_service_id = DEFAULT_UPF_SERVICE_ID;
     state->access_port = DEFAULT_ACCESS_PORT;
     state->punt.fd = -1;
+    state->aux_poll_interval_cycles =
+        rte_get_timer_hz() * AUX_POLL_INTERVAL_US / 1000000U;
+    if (state->aux_poll_interval_cycles == 0) {
+        state->aux_poll_interval_cycles = 1;
+    }
     strcpy(state->control_socket, DEFAULT_CONTROL_SOCKET);
     n3iwf_dp_session_table_init(&state->sessions);
     n3iwf_dp_child_sa_table_init(&state->child_sas);
@@ -370,12 +390,14 @@ main(int argc, char **argv)
     }
 
     printf("N3IWF-DP control=%s upf_service=%u access_port=%u mode=%s "
-           "cp_tap=%s kernel_signalling_esp=%s access_mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+           "cp_tap=%s kernel_signalling_esp=%s aux_poll_us=%u "
+           "access_mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
            state->control_socket, state->upf_service_id, state->access_port,
            state->cleartext_test ? "cleartext-test" :
            (state->software_ipsec ? "software-ipsec" : "fail-closed"),
            state->punt_enabled ? state->punt.ifname : "disabled",
            state->allow_kernel_signalling_esp ? "enabled" : "disabled",
+           AUX_POLL_INTERVAL_US,
            state->access_mac[0], state->access_mac[1], state->access_mac[2],
            state->access_mac[3], state->access_mac[4], state->access_mac[5]);
     onvm_nflib_run(local_context);
