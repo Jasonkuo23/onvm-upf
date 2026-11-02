@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/socket.h>
 
 #include "utlt_lib.h"
@@ -204,41 +205,25 @@ static Status PacketRecvThreadTerm(void *data) {
 }
 
 void PacketReceiverThread(ThreadID id, void *data) {
-    Status status;
-    /*
-    int nfds;
-    Sock *sockPtr;
-    struct epoll_event events[MAX_NUM_OF_EVENT];
-    */    
-    utime_t prev, now; // For timer checking purpose
-
-    prev = TimeNow();
-
+    (void)data;
+    /* ONVM receives packets. This legacy thread only services timers, whose
+     * deadlines in utlt_timer.c have millisecond resolution. Blocking here
+     * leaves the shared CPU available to the ONVM packet poller. */
     while (!ThreadStop()) {
-        /*
-        nfds = EpollWait(Self()->epfd, events, 300);
-        UTLT_Assert(nfds >= 0, , "Epoll Wait error : %s", strerror(errno));
-
-        for (int i = 0; i < nfds; i++) {
-            sockPtr = events[i].data.ptr;
-            status = sockPtr->handler(sockPtr, sockPtr->data);
-            // TODO : Log may show which socket
-            UTLT_Assert(status == STATUS_OK, , "Error handling UP socket");
+        struct timespec remaining = {.tv_sec = 0, .tv_nsec = 1000000};
+        while (nanosleep(&remaining, &remaining) != 0) {
+            if (errno != EINTR) {
+                UTLT_Error("Timer thread nanosleep failed: errno=%d", errno);
+                goto stopped;
+            }
+            if (ThreadStop())
+                goto stopped;
         }
-        */
-        // Check if timer expired
-        now = TimeNow();
-        if (now - prev > 10) {
-            TimerExpireCheck(
-                    &Self()->timerServiceList, Self()->eventQ);
-
-            prev = now;
-        }
-
+        if (!ThreadStop())
+            TimerExpireCheck(&Self()->timerServiceList, Self()->eventQ);
     }
 
+stopped:
     sem_post(((Thread *)id)->semaphore);
-    UTLT_Trace("Packet receiver thread terminated");
-
-    return;
+    UTLT_Trace("Timer thread terminated");
 }
