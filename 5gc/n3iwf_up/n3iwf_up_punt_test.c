@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "n3iwf_dp_punt.h"
+#include "n3iwf_up_punt.h"
 
 #include <arpa/inet.h>
 #include <assert.h>
@@ -91,84 +91,84 @@ main(void)
     uint32_t local;
     size_t length;
     int sockets[2];
-    struct n3iwf_dp_punt punt = {.fd = -1};
+    struct n3iwf_up_punt punt = {.fd = -1};
 
     assert(inet_pton(AF_INET, "192.168.127.1", &local) == 1);
 
     length = build_arp(frame, "192.168.127.2", "192.168.127.1");
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_ARP);
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_ARP);
     length = build_arp(frame, "192.168.127.1", "192.168.127.2");
-    assert(n3iwf_dp_punt_classify_from_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_ARP);
+    assert(n3iwf_up_punt_classify_from_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_ARP);
 
     length = build_udp(frame, "192.168.127.2", "192.168.127.1", 500, 500,
                        marker, sizeof(marker));
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_IKE);
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_IKE);
     length = build_udp(frame, "192.168.127.1", "192.168.127.2", 500, 500,
                        marker, sizeof(marker));
-    assert(n3iwf_dp_punt_classify_from_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_IKE);
+    assert(n3iwf_up_punt_classify_from_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_IKE);
 
     length = build_udp(frame, "192.168.127.2", "192.168.127.1", 4500, 4500,
                        marker, sizeof(marker));
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_IKE);
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_IKE);
     length = build_udp(frame, "192.168.127.1", "192.168.127.2", 4500, 4500,
                        marker, sizeof(marker));
-    assert(n3iwf_dp_punt_classify_from_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_IKE);
+    assert(n3iwf_up_punt_classify_from_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_IKE);
     length = build_udp(frame, "192.168.127.2", "192.168.127.1", 4500, 4500,
                        keepalive, sizeof(keepalive));
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_IKE);
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_IKE);
     length = build_udp(frame, "192.168.127.2", "192.168.127.1", 4500, 4500,
                        esp_payload, sizeof(esp_payload));
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_NONE);
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, true) ==
-           N3IWF_DP_PUNT_ESP);
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_NONE);
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, true) ==
+           N3IWF_UP_PUNT_ESP);
     length = build_udp(frame, "192.168.127.1", "192.168.127.2", 4500, 4500,
                        esp_payload, sizeof(esp_payload));
-    assert(n3iwf_dp_punt_classify_from_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_NONE);
-    assert(n3iwf_dp_punt_classify_from_cp(frame, length, local, true) ==
-           N3IWF_DP_PUNT_ESP);
+    assert(n3iwf_up_punt_classify_from_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_NONE);
+    assert(n3iwf_up_punt_classify_from_cp(frame, length, local, true) ==
+           N3IWF_UP_PUNT_ESP);
 
     length = build_esp(frame, "192.168.127.2", "192.168.127.1");
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, false) ==
-           N3IWF_DP_PUNT_NONE);
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, true) ==
-           N3IWF_DP_PUNT_ESP);
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, false) ==
+           N3IWF_UP_PUNT_NONE);
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, true) ==
+           N3IWF_UP_PUNT_ESP);
     length = build_esp(frame, "192.168.127.1", "192.168.127.2");
-    assert(n3iwf_dp_punt_classify_from_cp(frame, length, local, true) ==
-           N3IWF_DP_PUNT_ESP);
+    assert(n3iwf_up_punt_classify_from_cp(frame, length, local, true) ==
+           N3IWF_UP_PUNT_ESP);
 
     length = build_udp(frame, "192.168.127.99", "192.168.127.2", 500, 500,
                        marker, sizeof(marker));
-    assert(n3iwf_dp_punt_classify_from_cp(frame, length, local, true) ==
-           N3IWF_DP_PUNT_NONE);
+    assert(n3iwf_up_punt_classify_from_cp(frame, length, local, true) ==
+           N3IWF_UP_PUNT_NONE);
 
     length = build_udp(frame, "192.168.127.2", "192.168.127.99", 500, 500,
                        marker, sizeof(marker));
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, true) ==
-           N3IWF_DP_PUNT_NONE);
-    assert(n3iwf_dp_punt_classify_to_cp(frame, 10, local, true) == -EMSGSIZE);
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, true) ==
+           N3IWF_UP_PUNT_NONE);
+    assert(n3iwf_up_punt_classify_to_cp(frame, 10, local, true) == -EMSGSIZE);
     frame[14 + 6] = 0x20;
-    assert(n3iwf_dp_punt_classify_to_cp(frame, length, local, true) ==
+    assert(n3iwf_up_punt_classify_to_cp(frame, length, local, true) ==
            -EOPNOTSUPP);
 
     assert(socketpair(AF_UNIX, SOCK_DGRAM, 0, sockets) == 0);
     punt.fd = sockets[0];
-    assert(n3iwf_dp_punt_write(&punt, frame, length) == (ssize_t)length);
+    assert(n3iwf_up_punt_write(&punt, frame, length) == (ssize_t)length);
     assert(recv(sockets[1], received, sizeof(received), 0) == (ssize_t)length);
     assert(write(sockets[1], frame, length) == (ssize_t)length);
-    assert(n3iwf_dp_punt_read(&punt, received, sizeof(received)) ==
+    assert(n3iwf_up_punt_read(&punt, received, sizeof(received)) ==
            (ssize_t)length);
     close(sockets[0]);
     close(sockets[1]);
 
-    puts("n3iwf_dp_punt_test: PASS");
+    puts("n3iwf_up_punt_test: PASS");
     return 0;
 }

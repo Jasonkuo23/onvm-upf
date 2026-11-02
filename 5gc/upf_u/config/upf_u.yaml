@@ -5,7 +5,7 @@ info:
 configuration:
   log_level: "warning"  # trace, debug, info, warning, error, fatal, panic
   dataplane:
-    # Logical N3 carried over the N3IWF-DP/UPF-U ONVM ring.
+    # Logical N3 carried over the N3IWF-UP/UPF-U ONVM ring.
     upf_n3_ip: "192.168.4.2"
     # Physical N6 owned by UPF-U on mlx5 DPDK port 0.
     upf_n6_ip: "192.168.3.1"

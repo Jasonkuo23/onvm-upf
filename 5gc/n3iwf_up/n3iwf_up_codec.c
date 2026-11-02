@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "n3iwf_dp_codec.h"
+#include "n3iwf_up_codec.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -54,8 +54,8 @@ write_be32(uint8_t *p, uint32_t value)
 }
 
 int
-n3iwf_dp_gtpu_build(uint8_t *out, size_t capacity, uint32_t teid, uint8_t qfi,
-                    bool rqi, enum n3iwf_dp_direction direction,
+n3iwf_up_gtpu_build(uint8_t *out, size_t capacity, uint32_t teid, uint8_t qfi,
+                    bool rqi, enum n3iwf_up_direction direction,
                     const uint8_t *payload, size_t payload_len,
                     size_t *encoded_len)
 {
@@ -64,8 +64,8 @@ n3iwf_dp_gtpu_build(uint8_t *out, size_t capacity, uint32_t teid, uint8_t qfi,
 
     if (out == NULL || encoded_len == NULL || (payload == NULL && payload_len != 0) ||
         teid == 0 || qfi == 0 || qfi > 63 ||
-        (direction != N3IWF_DP_DOWNLINK && direction != N3IWF_DP_UPLINK) ||
-        (direction == N3IWF_DP_UPLINK && rqi)) {
+        (direction != N3IWF_UP_DOWNLINK && direction != N3IWF_UP_UPLINK) ||
+        (direction == N3IWF_UP_UPLINK && rqi)) {
         return -EINVAL;
     }
     if (after_mandatory > UINT16_MAX || capacity < header_len + payload_len) {
@@ -73,7 +73,7 @@ n3iwf_dp_gtpu_build(uint8_t *out, size_t capacity, uint32_t teid, uint8_t qfi,
     }
 
     out[0] = GTPU_FLAGS_V1_PT_E;
-    out[1] = N3IWF_DP_GTPU_TPDU;
+    out[1] = N3IWF_UP_GTPU_TPDU;
     write_be16(out + 2, (uint16_t)after_mandatory);
     write_be32(out + 4, teid);
 
@@ -82,14 +82,14 @@ n3iwf_dp_gtpu_build(uint8_t *out, size_t capacity, uint32_t teid, uint8_t qfi,
     out[8] = 0;
     out[9] = 0;
     out[10] = 0;
-    out[11] = N3IWF_DP_GTPU_PSC;
+    out[11] = N3IWF_UP_GTPU_PSC;
 
     /* TS 29.281 extension length is expressed in four-octet units. The
      * first content nibble is the PDU type: 0=DL, 1=UL. */
     out[12] = 1;
-    out[13] = direction == N3IWF_DP_UPLINK ? 0x10U : 0x00U;
+    out[13] = direction == N3IWF_UP_UPLINK ? 0x10U : 0x00U;
     out[14] = (qfi & 0x3fU) |
-              (direction == N3IWF_DP_DOWNLINK && rqi ? 0x40U : 0U);
+              (direction == N3IWF_UP_DOWNLINK && rqi ? 0x40U : 0U);
     out[15] = 0;
 
     if (payload_len != 0) {
@@ -100,8 +100,8 @@ n3iwf_dp_gtpu_build(uint8_t *out, size_t capacity, uint32_t teid, uint8_t qfi,
 }
 
 int
-n3iwf_dp_gtpu_parse(const uint8_t *packet, size_t packet_len,
-                    struct n3iwf_dp_gtpu_view *view)
+n3iwf_up_gtpu_parse(const uint8_t *packet, size_t packet_len,
+                    struct n3iwf_up_gtpu_view *view)
 {
     size_t offset = GTPU_BASE_LEN;
     size_t declared_len;
@@ -109,14 +109,14 @@ n3iwf_dp_gtpu_parse(const uint8_t *packet, size_t packet_len,
     uint8_t qfi = 0;
     bool rqi = false;
     bool psc_seen = false;
-    enum n3iwf_dp_direction direction = N3IWF_DP_DOWNLINK;
+    enum n3iwf_up_direction direction = N3IWF_UP_DOWNLINK;
 
     if (packet == NULL || view == NULL || packet_len < GTPU_BASE_LEN) {
         return -EINVAL;
     }
     memset(view, 0, sizeof(*view));
 
-    if ((packet[0] & 0xf0U) != 0x30U || packet[1] != N3IWF_DP_GTPU_TPDU) {
+    if ((packet[0] & 0xf0U) != 0x30U || packet[1] != N3IWF_UP_GTPU_TPDU) {
         return -EPROTO;
     }
     declared_len = (size_t)read_be16(packet + 2) + GTPU_BASE_LEN;
@@ -149,7 +149,7 @@ n3iwf_dp_gtpu_parse(const uint8_t *packet, size_t packet_len,
         }
 
         next_extension = packet[offset + extension_len - 1];
-        if (current_type == N3IWF_DP_GTPU_PSC) {
+        if (current_type == N3IWF_UP_GTPU_PSC) {
             uint8_t pdu_type;
             uint8_t qos_octet;
 
@@ -166,17 +166,17 @@ n3iwf_dp_gtpu_parse(const uint8_t *packet, size_t packet_len,
             if ((packet[offset + 1] & 0x0fU) != 0) {
                 return -EOPNOTSUPP;
             }
-            if (pdu_type == N3IWF_DP_DOWNLINK) {
+            if (pdu_type == N3IWF_UP_DOWNLINK) {
                 if ((qos_octet & 0x80U) != 0) {
                     return -EOPNOTSUPP;
                 }
-                direction = N3IWF_DP_DOWNLINK;
+                direction = N3IWF_UP_DOWNLINK;
                 rqi = (qos_octet & 0x40U) != 0;
-            } else if (pdu_type == N3IWF_DP_UPLINK) {
+            } else if (pdu_type == N3IWF_UP_UPLINK) {
                 if ((qos_octet & 0xc0U) != 0) {
                     return -EOPNOTSUPP;
                 }
-                direction = N3IWF_DP_UPLINK;
+                direction = N3IWF_UP_UPLINK;
                 rqi = false;
             } else {
                 return -EPROTONOSUPPORT;
@@ -204,19 +204,19 @@ n3iwf_dp_gtpu_parse(const uint8_t *packet, size_t packet_len,
 }
 
 int
-n3iwf_dp_gre_build(uint8_t *out, size_t capacity, uint16_t protocol,
+n3iwf_up_gre_build(uint8_t *out, size_t capacity, uint16_t protocol,
                    uint8_t qfi, bool rqi,
-                   enum n3iwf_dp_direction direction, const uint8_t *payload,
+                   enum n3iwf_up_direction direction, const uint8_t *payload,
                    size_t payload_len, size_t *encoded_len)
 {
     const size_t header_len = GRE_BASE_LEN + GRE_KEY_LEN;
 
     if (out == NULL || encoded_len == NULL || (payload == NULL && payload_len != 0) ||
-        (protocol != N3IWF_DP_GRE_PROTO_IPV4 &&
-         protocol != N3IWF_DP_GRE_PROTO_IPV6) ||
+        (protocol != N3IWF_UP_GRE_PROTO_IPV4 &&
+         protocol != N3IWF_UP_GRE_PROTO_IPV6) ||
         qfi == 0 || qfi > 63 ||
-        (direction != N3IWF_DP_DOWNLINK && direction != N3IWF_DP_UPLINK) ||
-        (direction == N3IWF_DP_UPLINK && rqi)) {
+        (direction != N3IWF_UP_DOWNLINK && direction != N3IWF_UP_UPLINK) ||
+        (direction == N3IWF_UP_UPLINK && rqi)) {
         return -EINVAL;
     }
     if (capacity < header_len + payload_len) {
@@ -235,14 +235,14 @@ n3iwf_dp_gre_build(uint8_t *out, size_t capacity, uint16_t protocol,
 }
 
 int
-n3iwf_dp_gre_parse(const uint8_t *packet, size_t packet_len,
-                   enum n3iwf_dp_direction direction,
-                   struct n3iwf_dp_gre_view *view)
+n3iwf_up_gre_parse(const uint8_t *packet, size_t packet_len,
+                   enum n3iwf_up_direction direction,
+                   struct n3iwf_up_gre_view *view)
 {
     uint16_t flags;
 
     if (packet == NULL || view == NULL || packet_len < GRE_BASE_LEN + GRE_KEY_LEN ||
-        (direction != N3IWF_DP_DOWNLINK && direction != N3IWF_DP_UPLINK)) {
+        (direction != N3IWF_UP_DOWNLINK && direction != N3IWF_UP_UPLINK)) {
         return -EINVAL;
     }
     memset(view, 0, sizeof(*view));
@@ -253,13 +253,13 @@ n3iwf_dp_gre_parse(const uint8_t *packet, size_t packet_len,
         return -EPROTO;
     }
     view->protocol = read_be16(packet + 2);
-    if (view->protocol != N3IWF_DP_GRE_PROTO_IPV4 &&
-        view->protocol != N3IWF_DP_GRE_PROTO_IPV6) {
+    if (view->protocol != N3IWF_UP_GRE_PROTO_IPV4 &&
+        view->protocol != N3IWF_UP_GRE_PROTO_IPV6) {
         return -EPROTONOSUPPORT;
     }
     view->key = read_be32(packet + 4);
     if ((view->key & ~(GRE_QFI_MASK | GRE_RQI_MASK)) != 0 ||
-        (direction == N3IWF_DP_UPLINK &&
+        (direction == N3IWF_UP_UPLINK &&
          (view->key & GRE_RQI_MASK) != 0)) {
         return -EPROTO;
     }

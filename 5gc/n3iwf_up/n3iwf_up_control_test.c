@@ -1,0 +1,411 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "n3iwf_up_control.h"
+
+#include <arpa/inet.h>
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <rte_eal.h>
+#include <unistd.h>
+
+static uint32_t
+read_be32(const uint8_t *data)
+{
+    uint32_t value;
+
+    memcpy(&value, data, sizeof(value));
+    return ntohl(value);
+}
+
+static uint16_t
+read_be16(const uint8_t *data)
+{
+    uint16_t value;
+
+    memcpy(&value, data, sizeof(value));
+    return ntohs(value);
+}
+
+static uint64_t
+read_be64(const uint8_t *data)
+{
+    uint64_t value;
+
+    memcpy(&value, data, sizeof(value));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return __builtin_bswap64(value);
+#else
+    return value;
+#endif
+}
+
+static uint64_t
+to_be64(uint64_t value)
+{
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return __builtin_bswap64(value);
+#else
+    return value;
+#endif
+}
+
+static size_t
+build_hello(uint8_t *message, size_t capacity, uint32_t xid, uint8_t role)
+{
+    struct n3iwf_up_wire_header header = {0};
+    struct n3iwf_up_hello_wire hello = {0};
+    size_t total = sizeof(header) + sizeof(hello);
+    assert(capacity >= total);
+    header.magic = htonl(N3IWF_UP_WIRE_MAGIC);
+    header.version = htons(N3IWF_UP_WIRE_VERSION);
+    header.type = htons(N3IWF_UP_MSG_HELLO);
+    header.length = htonl((uint32_t)total);
+    header.transaction_id = htonl(xid);
+    hello.role = role;
+    memcpy(message, &header, sizeof(header));
+    memcpy(message + sizeof(header), &hello, sizeof(hello));
+    return total;
+}
+
+static size_t
+build_upsert(uint8_t *message, size_t capacity, uint32_t xid,
+             uint64_t generation)
+{
+    struct n3iwf_up_wire_header header = {0};
+    struct n3iwf_up_session_wire session = {0};
+    size_t total = sizeof(header) + sizeof(session);
+
+    assert(capacity >= total);
+    header.magic = htonl(N3IWF_UP_WIRE_MAGIC);
+    header.version = htons(N3IWF_UP_WIRE_VERSION);
+    header.type = htons(N3IWF_UP_MSG_SESSION_UPSERT);
+    header.length = htonl((uint32_t)total);
+    header.transaction_id = htonl(xid);
+    header.generation = to_be64(generation);
+
+    session.ue_id = to_be64(42);
+    session.pdu_session_id = htonl(10);
+    session.uplink_teid = htonl(100);
+    session.downlink_teid = htonl(200);
+    session.address_family = N3IWF_UP_AF_IPV4;
+    session.qfi_count = 1;
+    session.ue_pdu_address[0] = 10;
+    session.ue_pdu_address[3] = 42;
+    session.ue_nwu_address[0] = 192;
+    session.ue_nwu_address[1] = 168;
+    session.ue_nwu_address[2] = 127;
+    session.ue_nwu_address[3] = 2;
+    session.qfi[0] = 5;
+
+    memcpy(message, &header, sizeof(header));
+    memcpy(message + sizeof(header), &session, sizeof(session));
+    return total;
+}
+
+static size_t
+build_stats_get(uint8_t *message, size_t capacity, uint32_t xid)
+{
+    struct n3iwf_up_wire_header header = {0};
+
+    assert(capacity >= sizeof(header));
+    header.magic = htonl(N3IWF_UP_WIRE_MAGIC);
+    header.version = htons(N3IWF_UP_WIRE_VERSION);
+    header.type = htons(N3IWF_UP_MSG_STATS_GET);
+    header.length = htonl((uint32_t)sizeof(header));
+    header.transaction_id = htonl(xid);
+    memcpy(message, &header, sizeof(header));
+    return sizeof(header);
+}
+
+static size_t
+build_child_sa_upsert(uint8_t *message, size_t capacity, uint32_t xid,
+                      uint64_t generation, uint32_t inbound_spi,
+                      uint32_t outbound_spi)
+{
+    struct n3iwf_up_wire_header header = {0};
+    struct n3iwf_up_child_sa_wire sa = {0};
+    size_t total = sizeof(header) + sizeof(sa);
+    assert(capacity >= total);
+    header.magic = htonl(N3IWF_UP_WIRE_MAGIC);
+    header.version = htons(N3IWF_UP_WIRE_VERSION);
+    header.type = htons(N3IWF_UP_MSG_CHILD_SA_UPSERT);
+    header.length = htonl((uint32_t)total);
+    header.transaction_id = htonl(xid);
+    header.generation = to_be64(generation);
+    sa.ue_id = to_be64(42);
+    sa.pdu_session_id = htonl(10);
+    sa.inbound_spi = htonl(inbound_spi);
+    sa.outbound_spi = htonl(outbound_spi);
+    sa.encryption_id = htons(12);
+    sa.integrity_id = htons(2);
+    sa.replay_window = htonl(64);
+    sa.address_family = N3IWF_UP_AF_IPV4;
+    sa.ip_protocol = 47;
+    sa.inbound_encryption_key_len = 16;
+    sa.outbound_encryption_key_len = 16;
+    sa.inbound_integrity_key_len = 20;
+    sa.outbound_integrity_key_len = 20;
+    memset(sa.inbound_encryption_key, 1, 16);
+    memset(sa.outbound_encryption_key, 2, 16);
+    memset(sa.inbound_integrity_key, 3, 20);
+    memset(sa.outbound_integrity_key, 4, 20);
+    memcpy(message, &header, sizeof(header));
+    memcpy(message + sizeof(header), &sa, sizeof(sa));
+    memset(&sa, 0, sizeof(sa));
+    return total;
+}
+
+static size_t
+build_child_sa_delete(uint8_t *message, size_t capacity, uint32_t xid,
+                      uint64_t generation, uint32_t inbound_spi)
+{
+    struct n3iwf_up_wire_header header = {0};
+    struct n3iwf_up_child_sa_delete_wire sa = {0};
+    size_t total = sizeof(header) + sizeof(sa);
+
+    assert(capacity >= total);
+    header.magic = htonl(N3IWF_UP_WIRE_MAGIC);
+    header.version = htons(N3IWF_UP_WIRE_VERSION);
+    header.type = htons(N3IWF_UP_MSG_CHILD_SA_DELETE);
+    header.length = htonl((uint32_t)total);
+    header.transaction_id = htonl(xid);
+    header.generation = to_be64(generation);
+    sa.ue_id = to_be64(42);
+    sa.pdu_session_id = htonl(10);
+    sa.inbound_spi = htonl(inbound_spi);
+    memcpy(message, &header, sizeof(header));
+    memcpy(message + sizeof(header), &sa, sizeof(sa));
+    return total;
+}
+
+static uint32_t
+response_status(const uint8_t *response, size_t length, uint32_t expected_xid)
+{
+    assert(length == sizeof(struct n3iwf_up_wire_header) +
+                     sizeof(struct n3iwf_up_ack_wire));
+    assert(read_be32(response + 0) == N3IWF_UP_WIRE_MAGIC);
+    assert(read_be16(response + 6) == N3IWF_UP_MSG_ACK);
+    assert(read_be32(response + 12) == expected_xid);
+    return read_be32(response + sizeof(struct n3iwf_up_wire_header));
+}
+
+static ssize_t test_send(struct n3dp_client *client, const void *data, size_t length, int flags)
+{
+    (void)flags;
+    int rc = n3dp_client_send(client, data, length);
+    return rc == 0 ? (ssize_t)length : rc;
+}
+static ssize_t test_recv(struct n3dp_client *client, void *data, size_t length, int flags)
+{
+    (void)flags;
+    return n3dp_client_receive(client, data, length, 0);
+}
+
+int
+main(void)
+{
+    struct n3dp_client *writer = NULL, *observer = NULL;
+    struct n3iwf_up_session_table table;
+    struct n3iwf_up_child_sa_table child_sas;
+    struct n3iwf_up_stats_wire stats = {0};
+    struct n3iwf_up_control control = {0};
+    uint8_t request[N3IWF_UP_CONTROL_MAX_MESSAGE];
+    uint8_t response[N3DP_MAX_MESSAGE];
+    size_t request_len;
+    ssize_t response_len;
+
+    char *eal[] = {"n3dp-control-test", "-l", "0", "--no-huge", "--no-pci", "--no-shconf", "--no-telemetry"};
+    assert(rte_eal_init(sizeof(eal) / sizeof(eal[0]), eal) >= 0);
+    n3iwf_up_session_table_init(&table);
+    n3iwf_up_child_sa_table_init(&child_sas);
+    assert(n3iwf_up_control_open(&control, "N3DP_TEST", &table, &child_sas, &stats) == 0);
+    assert(n3dp_client_open("N3DP_TEST", &writer) == 0);
+    assert(n3dp_client_open("N3DP_TEST", &observer) == 0);
+
+    request_len = build_hello(request, sizeof(request), 1,
+                              N3IWF_UP_ROLE_WRITER);
+    response_len = test_send(writer, request, request_len, 0);
+    if (response_len != (ssize_t)request_len) {
+        perror("send writer hello");
+    }
+    assert(response_len == (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(writer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 1) ==
+           N3IWF_UP_STATUS_OK);
+
+    request_len = build_hello(request, sizeof(request), 2,
+                              N3IWF_UP_ROLE_OBSERVER);
+    assert(test_send(observer, request, request_len, 0) ==
+           (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(observer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 2) ==
+           N3IWF_UP_STATUS_OK);
+
+    request_len = build_hello(request, sizeof(request), 20,
+                              N3IWF_UP_ROLE_WRITER);
+    assert(test_send(observer, request, request_len, 0) ==
+           (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(observer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 20) ==
+           N3IWF_UP_STATUS_CAPACITY);
+
+    request_len = build_child_sa_upsert(request, sizeof(request), 3, 1,
+                                        1001, 1002);
+    assert(test_send(observer, request, request_len, 0) ==
+           (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(observer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 3) ==
+           N3IWF_UP_STATUS_UNSUPPORTED);
+    assert(child_sas.count == 0);
+
+    request_len = build_child_sa_upsert(request, sizeof(request), 4, 1,
+                                        1001, 1002);
+    assert(test_send(writer, request, request_len, 0) == (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(writer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 4) ==
+           N3IWF_UP_STATUS_OK);
+    assert(child_sas.count == 1);
+
+    request_len = build_upsert(request, sizeof(request), 7, 2);
+    assert(test_send(writer, request, request_len, 0) == (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(writer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 7) ==
+           N3IWF_UP_STATUS_OK);
+    assert(table.count == 1);
+    {
+        const struct n3iwf_up_child_sa *child =
+            n3iwf_up_child_sa_find_inbound(&child_sas, 1001);
+        const struct n3iwf_up_session *bound =
+            n3iwf_up_child_sa_get_bound_session(child, &table);
+
+        assert(bound != NULL && bound->ue_id == 42 &&
+               bound->pdu_session_id == 10);
+    }
+
+    request_len = build_upsert(request, sizeof(request), 8, 2);
+    assert(test_send(writer, request, request_len, 0) == (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(writer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 8) ==
+           N3IWF_UP_STATUS_STALE_GENERATION);
+    assert(stats.stale_updates == 1);
+
+    request_len = build_child_sa_upsert(request, sizeof(request), 10, 3,
+                                        2001, 2002);
+    assert(test_send(writer, request, request_len, 0) == (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(writer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 10) ==
+           N3IWF_UP_STATUS_OK);
+    assert(child_sas.count == 2);
+    {
+        const struct n3iwf_up_session *session =
+            n3iwf_up_session_find_downlink(&table, 200, 5);
+        const struct n3iwf_up_child_sa *old =
+            n3iwf_up_child_sa_find_inbound(&child_sas, 1001);
+        const struct n3iwf_up_child_sa *replacement =
+            n3iwf_up_child_sa_find_inbound(&child_sas, 2001);
+        const struct n3iwf_up_child_sa *active =
+            n3iwf_up_child_sa_get_active_outbound(&child_sas, session, NULL);
+        assert(active != NULL &&
+               ntohl(active->parameters.inbound_spi) == 2001);
+        assert(n3iwf_up_child_sa_get_bound_session(old, &table) == session);
+        assert(n3iwf_up_child_sa_get_bound_session(replacement, &table) ==
+               session);
+    }
+
+    request_len = build_child_sa_delete(request, sizeof(request), 11, 4,
+                                        1001);
+    assert(test_send(writer, request, request_len, 0) == (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(writer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 11) ==
+           N3IWF_UP_STATUS_OK);
+    assert(child_sas.count == 1 && table.count == 1);
+    assert(n3iwf_up_child_sa_find_inbound(&child_sas, 1001) == NULL);
+    assert(n3iwf_up_child_sa_find_inbound(&child_sas, 2001) != NULL);
+    {
+        const struct n3iwf_up_session *session =
+            n3iwf_up_session_find_downlink(&table, 200, 5);
+        const struct n3iwf_up_child_sa *active =
+            n3iwf_up_child_sa_get_active_outbound(&child_sas, session, NULL);
+        assert(active != NULL &&
+               ntohl(active->parameters.inbound_spi) == 2001);
+    }
+
+    request_len = build_child_sa_upsert(request, sizeof(request), 12, 4,
+                                        1001, 1002);
+    assert(test_send(writer, request, request_len, 0) == (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(writer, response, sizeof(response), 0);
+    assert(response_status(response, (size_t)response_len, 12) ==
+           N3IWF_UP_STATUS_STALE_GENERATION);
+    assert(stats.stale_updates == 2);
+
+    stats.uplink_packets = 11;
+    stats.downlink_packets = 12;
+    stats.unknown_teid = 13;
+    stats.unknown_qfi = 14;
+    stats.malformed_packets = 15;
+    stats.replay_drops = 16;
+    stats.crypto_failures = 17;
+    stats.fragment_drops = 18;
+    stats.control_to_cp = 20;
+    stats.control_from_cp = 21;
+    stats.control_punt_drops = 22;
+    stats.access_mac_learns = 23;
+    stats.access_mac_changes = 24;
+    stats.access_neighbor_drops = 25;
+    stats.unknown_spi = 26;
+    stats.oversize_drops = 27;
+    stats.buffer_drops = 28;
+    request_len = build_stats_get(request, sizeof(request), 9);
+    assert(test_send(observer, request, request_len, 0) ==
+           (ssize_t)request_len);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    response_len = test_recv(observer, response, sizeof(response), 0);
+    assert(response_len == (ssize_t)(sizeof(struct n3iwf_up_wire_header) +
+                                      sizeof(struct n3iwf_up_stats_wire)));
+    assert(read_be32(response + 0) == N3IWF_UP_WIRE_MAGIC);
+    assert(read_be16(response + 6) == N3IWF_UP_MSG_STATS);
+    assert(read_be32(response + 12) == 9);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 0) == 11);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 8) == 12);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 16) == 13);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 24) == 14);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 32) == 15);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 40) == 16);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 48) == 17);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 56) == 18);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 64) == 2);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 72) == 20);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 80) == 21);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 88) == 22);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 96) == 23);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 104) == 24);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 112) == 25);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 120) == 1);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 128) == 1);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 136) == 26);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 144) == 27);
+    assert(read_be64(response + sizeof(struct n3iwf_up_wire_header) + 152) == 28);
+
+    n3dp_client_close(writer);
+    n3dp_client_close(observer);
+    assert(n3iwf_up_control_poll(&control) == 0);
+    n3iwf_up_control_close(&control);
+    assert(rte_eal_cleanup() == 0);
+    puts("n3iwf_up shared-memory control tests passed");
+    return 0;
+}

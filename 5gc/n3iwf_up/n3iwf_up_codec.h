@@ -5,36 +5,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef N3IWF_DP_CODEC_H
-#define N3IWF_DP_CODEC_H
+#ifndef N3IWF_UP_CODEC_H
+#define N3IWF_UP_CODEC_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define N3IWF_DP_GTPU_PORT 2152U
-#define N3IWF_DP_GTPU_TPDU 0xffU
-#define N3IWF_DP_GTPU_PSC  0x85U
+#define N3IWF_UP_GTPU_PORT 2152U
+#define N3IWF_UP_GTPU_TPDU 0xffU
+#define N3IWF_UP_GTPU_PSC  0x85U
 
-#define N3IWF_DP_GRE_PROTO_IPV4 0x0800U
-#define N3IWF_DP_GRE_PROTO_IPV6 0x86ddU
+#define N3IWF_UP_GRE_PROTO_IPV4 0x0800U
+#define N3IWF_UP_GRE_PROTO_IPV6 0x86ddU
 
-enum n3iwf_dp_direction {
-    N3IWF_DP_DOWNLINK = 0,
-    N3IWF_DP_UPLINK = 1,
+enum n3iwf_up_direction {
+    N3IWF_UP_DOWNLINK = 0,
+    N3IWF_UP_UPLINK = 1,
 };
 
-struct n3iwf_dp_gtpu_view {
+struct n3iwf_up_gtpu_view {
     uint32_t teid;
     uint8_t qfi;
     bool rqi;
-    enum n3iwf_dp_direction direction;
+    enum n3iwf_up_direction direction;
     const uint8_t *payload;
     size_t payload_len;
     size_t header_len;
 };
 
-struct n3iwf_dp_gre_view {
+struct n3iwf_up_gre_view {
     uint16_t protocol;
     uint32_t key;
     uint8_t qfi;
@@ -49,14 +49,14 @@ struct n3iwf_dp_gre_view {
  * The builder always includes a PDU Session Container so QFI is never lost.
  */
 int
-n3iwf_dp_gtpu_build(uint8_t *out, size_t capacity, uint32_t teid, uint8_t qfi,
-                    bool rqi, enum n3iwf_dp_direction direction,
+n3iwf_up_gtpu_build(uint8_t *out, size_t capacity, uint32_t teid, uint8_t qfi,
+                    bool rqi, enum n3iwf_up_direction direction,
                     const uint8_t *payload, size_t payload_len,
                     size_t *encoded_len);
 
 int
-n3iwf_dp_gtpu_parse(const uint8_t *packet, size_t packet_len,
-                    struct n3iwf_dp_gtpu_view *view);
+n3iwf_up_gtpu_parse(const uint8_t *packet, size_t packet_len,
+                    struct n3iwf_up_gtpu_view *view);
 
 /*
  * TS 24.502 section 9.3.3 carries QFI in bits 24..29 and downlink RQI in bit
@@ -65,14 +65,14 @@ n3iwf_dp_gtpu_parse(const uint8_t *packet, size_t packet_len,
  * downlink user-data packet. Reserved key bits are rejected.
  */
 int
-n3iwf_dp_gre_build(uint8_t *out, size_t capacity, uint16_t protocol,
+n3iwf_up_gre_build(uint8_t *out, size_t capacity, uint16_t protocol,
                    uint8_t qfi, bool rqi,
-                   enum n3iwf_dp_direction direction, const uint8_t *payload,
+                   enum n3iwf_up_direction direction, const uint8_t *payload,
                    size_t payload_len, size_t *encoded_len);
 
 int
-n3iwf_dp_gre_parse(const uint8_t *packet, size_t packet_len,
-                   enum n3iwf_dp_direction direction,
-                   struct n3iwf_dp_gre_view *view);
+n3iwf_up_gre_parse(const uint8_t *packet, size_t packet_len,
+                   enum n3iwf_up_direction direction,
+                   struct n3iwf_up_gre_view *view);
 
 #endif

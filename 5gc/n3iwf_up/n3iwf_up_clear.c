@@ -2,11 +2,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "n3iwf_dp_clear.h"
+#include "n3iwf_up_clear.h"
 
-#include "n3iwf_dp_codec.h"
-#include "n3iwf_dp_downlink.h"
-#include "n3iwf_dp_mtu.h"
+#include "n3iwf_up_codec.h"
+#include "n3iwf_up_downlink.h"
+#include "n3iwf_up_mtu.h"
 
 #include <errno.h>
 #include <netinet/in.h>
@@ -61,7 +61,7 @@ parse_l3(const uint8_t *packet, size_t packet_len, struct l3_view *view)
              (RTE_IPV4_HDR_MF_FLAG | RTE_IPV4_HDR_OFFSET_MASK)) != 0) {
             return -EINPROGRESS;
         }
-        view->family = N3IWF_DP_AF_IPV4;
+        view->family = N3IWF_UP_AF_IPV4;
         view->next_header = ipv4->next_proto_id;
         view->header_len = header_len;
         view->source = (const uint8_t *)&ipv4->src_addr;
@@ -81,7 +81,7 @@ parse_l3(const uint8_t *packet, size_t packet_len, struct l3_view *view)
         if (ipv6->proto == IPPROTO_FRAGMENT) {
             return -EINPROGRESS;
         }
-        view->family = N3IWF_DP_AF_IPV6;
+        view->family = N3IWF_UP_AF_IPV6;
         view->next_header = ipv6->proto;
         view->header_len = sizeof(*ipv6);
         view->source = ipv6->src_addr.a;
@@ -91,7 +91,7 @@ parse_l3(const uint8_t *packet, size_t packet_len, struct l3_view *view)
 }
 
 static int
-prepend_gtpu(struct rte_mbuf *packet, const struct n3iwf_dp_session *session,
+prepend_gtpu(struct rte_mbuf *packet, const struct n3iwf_up_session *session,
              uint8_t qfi)
 {
     const size_t headers_len = sizeof(struct rte_ether_hdr) +
@@ -109,8 +109,8 @@ prepend_gtpu(struct rte_mbuf *packet, const struct n3iwf_dp_session *session,
                     sizeof(struct rte_udp_hdr) - sizeof(gtpu_header)) {
         return -EMSGSIZE;
     }
-    if (n3iwf_dp_gtpu_build(gtpu_header, sizeof(gtpu_header),
-                            session->uplink_teid, qfi, false, N3IWF_DP_UPLINK,
+    if (n3iwf_up_gtpu_build(gtpu_header, sizeof(gtpu_header),
+                            session->uplink_teid, qfi, false, N3IWF_UP_UPLINK,
                             NULL, 0, &gtpu_len) != 0) {
         return -EINVAL;
     }
@@ -137,8 +137,8 @@ prepend_gtpu(struct rte_mbuf *packet, const struct n3iwf_dp_session *session,
     memcpy(&ipv4->dst_addr, session->upf_n3_address, 4);
     ipv4->hdr_checksum = rte_ipv4_cksum(ipv4);
 
-    udp->src_port = rte_cpu_to_be_16(N3IWF_DP_GTPU_PORT);
-    udp->dst_port = rte_cpu_to_be_16(N3IWF_DP_GTPU_PORT);
+    udp->src_port = rte_cpu_to_be_16(N3IWF_UP_GTPU_PORT);
+    udp->dst_port = rte_cpu_to_be_16(N3IWF_UP_GTPU_PORT);
     udp->dgram_len = rte_cpu_to_be_16((uint16_t)(sizeof(*udp) +
                                   gtpu_len + inner_len));
     udp->dgram_cksum = 0;
@@ -147,23 +147,23 @@ prepend_gtpu(struct rte_mbuf *packet, const struct n3iwf_dp_session *session,
 
 static int
 handle_uplink(struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
-              struct n3iwf_dp_session_table *sessions,
-              struct n3iwf_dp_session *authenticated_session,
-              struct n3iwf_dp_stats_wire *stats, uint16_t upf_service_id,
+              struct n3iwf_up_session_table *sessions,
+              struct n3iwf_up_session *authenticated_session,
+              struct n3iwf_up_stats_wire *stats, uint16_t upf_service_id,
               const struct l3_view *outer,
-              const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
+              const uint8_t access_mac[N3IWF_UP_ETHER_ADDR_LEN])
 {
     size_t gre_offset = sizeof(struct rte_ether_hdr) + outer->header_len;
     const uint8_t *data = rte_pktmbuf_mtod(packet, const uint8_t *);
-    struct n3iwf_dp_gre_view gre;
+    struct n3iwf_up_gre_view gre;
     const struct rte_ether_hdr *ether = (const struct rte_ether_hdr *)data;
-    struct n3iwf_dp_session *session;
-    enum n3iwf_dp_mac_learn_result learn_result;
+    struct n3iwf_up_session *session;
+    enum n3iwf_up_mac_learn_result learn_result;
     size_t inner_offset;
 
-    if (n3iwf_dp_gre_parse(data + gre_offset,
+    if (n3iwf_up_gre_parse(data + gre_offset,
                            rte_pktmbuf_pkt_len(packet) - gre_offset,
-                           N3IWF_DP_UPLINK, &gre) != 0) {
+                           N3IWF_UP_UPLINK, &gre) != 0) {
         ++stats->malformed_packets;
         return -EINVAL;
     }
@@ -171,29 +171,29 @@ handle_uplink(struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
      * address inside NAS. Clear mode uses NWu source plus QFI as the test-only
      * equivalent of the production Child-SA SPI plus QFI lookup. */
     if (authenticated_session != NULL) {
-        size_t length = outer->family == N3IWF_DP_AF_IPV4 ? 4U : 16U;
+        size_t length = outer->family == N3IWF_UP_AF_IPV4 ? 4U : 16U;
 
         session = authenticated_session;
         if (session->address_family != outer->family ||
             memcmp(session->ue_nwu_address, outer->source, length) != 0 ||
-            !n3iwf_dp_session_allows_qfi(session, gre.qfi)) {
+            !n3iwf_up_session_allows_qfi(session, gre.qfi)) {
             session = NULL;
         }
     } else {
-        session = n3iwf_dp_session_find_uplink_mutable(
+        session = n3iwf_up_session_find_uplink_mutable(
             sessions, outer->family, outer->source, gre.qfi);
     }
     if (session == NULL) {
         ++stats->unknown_qfi;
         return -ENOENT;
     }
-    if (!n3iwf_dp_inner_packet_supported(gre.payload_len)) {
+    if (!n3iwf_up_inner_packet_supported(gre.payload_len)) {
         ++stats->oversize_drops;
         return -EMSGSIZE;
     }
     if (access_mac == NULL ||
         memcmp(ether->dst_addr.addr_bytes, access_mac,
-               N3IWF_DP_ETHER_ADDR_LEN) != 0) {
+               N3IWF_UP_ETHER_ADDR_LEN) != 0) {
         ++stats->access_neighbor_drops;
         return -EHOSTUNREACH;
     }
@@ -201,19 +201,19 @@ handle_uplink(struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
     if (inner_offset > UINT16_MAX ||
         rte_pktmbuf_headroom(packet) + inner_offset <
             sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) +
-                sizeof(struct rte_udp_hdr) + N3IWF_DP_GTPU_PSC_HEADER_LEN) {
+                sizeof(struct rte_udp_hdr) + N3IWF_UP_GTPU_PSC_HEADER_LEN) {
         ++stats->buffer_drops;
         return -ENOSPC;
     }
-    learn_result = n3iwf_dp_session_learn_access_mac(
+    learn_result = n3iwf_up_session_learn_access_mac(
         session, ether->src_addr.addr_bytes);
-    if (learn_result == N3IWF_DP_MAC_INVALID) {
+    if (learn_result == N3IWF_UP_MAC_INVALID) {
         ++stats->access_neighbor_drops;
         return -EINVAL;
     }
-    if (learn_result == N3IWF_DP_MAC_LEARNED) {
+    if (learn_result == N3IWF_UP_MAC_LEARNED) {
         ++stats->access_mac_learns;
-    } else if (learn_result == N3IWF_DP_MAC_CHANGED) {
+    } else if (learn_result == N3IWF_UP_MAC_CHANGED) {
         ++stats->access_mac_changes;
     }
     if (rte_pktmbuf_adj(packet, (uint16_t)inner_offset) == NULL ||
@@ -228,14 +228,14 @@ handle_uplink(struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
 }
 
 int
-n3iwf_dp_handle_clear_packet(
+n3iwf_up_handle_clear_packet(
     struct rte_mbuf *packet,
     struct onvm_pkt_meta *meta,
-    struct n3iwf_dp_session_table *sessions,
-    struct n3iwf_dp_stats_wire *stats,
+    struct n3iwf_up_session_table *sessions,
+    struct n3iwf_up_stats_wire *stats,
     uint16_t upf_service_id,
     uint16_t access_port,
-    const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
+    const uint8_t access_mac[N3IWF_UP_ETHER_ADDR_LEN])
 {
     const uint8_t *data;
     struct l3_view l3;
@@ -261,7 +261,7 @@ n3iwf_dp_handle_clear_packet(
                              upf_service_id, &l3, access_mac);
     }
     if (l3.next_header == IPPROTO_UDP) {
-        return n3iwf_dp_handle_clear_downlink(packet, meta, sessions, stats,
+        return n3iwf_up_handle_clear_downlink(packet, meta, sessions, stats,
                                                access_port, access_mac);
     }
     ++stats->malformed_packets;
@@ -269,11 +269,11 @@ n3iwf_dp_handle_clear_packet(
 }
 
 int
-n3iwf_dp_handle_authenticated_uplink(
+n3iwf_up_handle_authenticated_uplink(
     struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
-    struct n3iwf_dp_session *session, struct n3iwf_dp_stats_wire *stats,
+    struct n3iwf_up_session *session, struct n3iwf_up_stats_wire *stats,
     uint16_t upf_service_id,
-    const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
+    const uint8_t access_mac[N3IWF_UP_ETHER_ADDR_LEN])
 {
     const uint8_t *data;
     struct l3_view l3;

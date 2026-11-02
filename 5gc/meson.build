@@ -2,7 +2,7 @@ subdir('classifiers')
 
 
 l25gc_nfs = [
-    'n3iwf_dp',
+    'n3iwf_up',
     'upf_u',
     'upf_c',
     'dn_app'

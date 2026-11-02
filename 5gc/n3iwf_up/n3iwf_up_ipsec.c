@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-#include "n3iwf_dp_ipsec.h"
+#include "n3iwf_up_ipsec.h"
 
-#include "n3iwf_dp_clear.h"
-#include "n3iwf_dp_downlink.h"
-#include "n3iwf_dp_mtu.h"
+#include "n3iwf_up_clear.h"
+#include "n3iwf_up_downlink.h"
+#include "n3iwf_up_mtu.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -18,6 +18,7 @@
 #include <rte_byteorder.h>
 #include <rte_crypto.h>
 #include <rte_cryptodev.h>
+#include <rte_cycles.h>
 #include <rte_ether.h>
 #include <rte_errno.h>
 #include <rte_ip.h>
@@ -26,7 +27,7 @@
 #include <rte_mbuf.h>
 #include <rte_security.h>
 
-#define IPSEC_SESSION_POOL_SIZE (2U * N3IWF_DP_MAX_CHILD_SAS)
+#define IPSEC_SESSION_POOL_SIZE (2U * N3IWF_UP_MAX_CHILD_SAS)
 #define IPSEC_SESSION_CACHE_SIZE 64U
 #define IPSEC_QUEUE_DESCRIPTORS 1024U
 #define ESP_HEADER_LEN 8U
@@ -34,12 +35,12 @@
     (sizeof(struct rte_crypto_op) + sizeof(struct rte_crypto_sym_op) + \
      2U * sizeof(struct rte_crypto_sym_xform))
 
-_Static_assert(ESP_HEADER_LEN == N3IWF_DP_ESP_HEADER_LEN,
+_Static_assert(ESP_HEADER_LEN == N3IWF_UP_ESP_HEADER_LEN,
                "MTU profile ESP header length must match IPsec");
-_Static_assert(N3IWF_DP_AES_CBC_IV_LEN ==
-                   N3IWF_DP_AES_CBC_IV_LEN_BYTES,
+_Static_assert(N3IWF_UP_AES_CBC_IV_LEN ==
+                   N3IWF_UP_AES_CBC_IV_LEN_BYTES,
                "MTU profile IV length must match IPsec");
-_Static_assert(N3IWF_DP_SHA1_96_LEN == N3IWF_DP_SHA1_96_ICV_LEN,
+_Static_assert(N3IWF_UP_SHA1_96_LEN == N3IWF_UP_SHA1_96_ICV_LEN,
                "MTU profile ICV length must match IPsec");
 
 static uint64_t be64_to_host(uint64_t value)
@@ -74,17 +75,17 @@ device_supports_profile(uint8_t device_id)
     auth = rte_cryptodev_sym_capability_get(device_id, &auth_index);
     return cipher != NULL && auth != NULL &&
            rte_cryptodev_sym_capability_check_cipher(
-               cipher, N3IWF_DP_AES_CBC_128_KEY_LEN,
-               N3IWF_DP_AES_CBC_IV_LEN) == 0 &&
+               cipher, N3IWF_UP_AES_CBC_128_KEY_LEN,
+               N3IWF_UP_AES_CBC_IV_LEN) == 0 &&
            rte_cryptodev_sym_capability_check_cipher(
-               cipher, N3IWF_DP_AES_CBC_256_KEY_LEN,
-               N3IWF_DP_AES_CBC_IV_LEN) == 0 &&
+               cipher, N3IWF_UP_AES_CBC_256_KEY_LEN,
+               N3IWF_UP_AES_CBC_IV_LEN) == 0 &&
            rte_cryptodev_sym_capability_check_auth(
-               auth, N3IWF_DP_SHA1_KEY_LEN, N3IWF_DP_SHA1_96_LEN, 0) == 0;
+               auth, N3IWF_UP_SHA1_KEY_LEN, N3IWF_UP_SHA1_96_LEN, 0) == 0;
 }
 
 int
-n3iwf_dp_ipsec_init(struct n3iwf_dp_ipsec *ipsec)
+n3iwf_up_ipsec_init(struct n3iwf_up_ipsec *ipsec)
 {
     struct rte_cryptodev_config config = {0};
     struct rte_cryptodev_qp_conf queue_config = {0};
@@ -152,8 +153,8 @@ n3iwf_dp_ipsec_init(struct n3iwf_dp_ipsec *ipsec)
 }
 
 static void
-release_runtime_sa(struct n3iwf_dp_ipsec *ipsec,
-                   struct n3iwf_dp_ipsec_sa *runtime)
+release_runtime_sa(struct n3iwf_up_ipsec *ipsec,
+                   struct n3iwf_up_ipsec_sa *runtime)
 {
     if (runtime->inbound_crypto != NULL) {
         (void)rte_cryptodev_sym_session_free(ipsec->device_id,
@@ -175,14 +176,14 @@ release_runtime_sa(struct n3iwf_dp_ipsec *ipsec,
 }
 
 void
-n3iwf_dp_ipsec_close(struct n3iwf_dp_ipsec *ipsec)
+n3iwf_up_ipsec_close(struct n3iwf_up_ipsec *ipsec)
 {
     size_t index;
 
     if (ipsec == NULL) {
         return;
     }
-    for (index = 0; index < N3IWF_DP_MAX_CHILD_SAS; ++index) {
+    for (index = 0; index < N3IWF_UP_MAX_CHILD_SAS; ++index) {
         if (ipsec->sas[index].used) {
             release_runtime_sa(ipsec, &ipsec->sas[index]);
         }
@@ -197,9 +198,9 @@ n3iwf_dp_ipsec_close(struct n3iwf_dp_ipsec *ipsec)
 }
 
 void
-n3iwf_dp_ipsec_reconcile(
-    struct n3iwf_dp_ipsec *ipsec,
-    const struct n3iwf_dp_child_sa_table *child_sas)
+n3iwf_up_ipsec_reconcile(
+    struct n3iwf_up_ipsec *ipsec,
+    const struct n3iwf_up_child_sa_table *child_sas)
 {
     size_t index;
 
@@ -209,9 +210,9 @@ n3iwf_dp_ipsec_reconcile(
     if (ipsec->reconciled_child_sa_revision == child_sas->revision) {
         return;
     }
-    for (index = 0; index < N3IWF_DP_MAX_CHILD_SAS; ++index) {
-        struct n3iwf_dp_ipsec_sa *runtime = &ipsec->sas[index];
-        const struct n3iwf_dp_child_sa *contract =
+    for (index = 0; index < N3IWF_UP_MAX_CHILD_SAS; ++index) {
+        struct n3iwf_up_ipsec_sa *runtime = &ipsec->sas[index];
+        const struct n3iwf_up_child_sa *contract =
             &child_sas->entries[index];
 
         if (!runtime->used) {
@@ -227,8 +228,8 @@ n3iwf_dp_ipsec_reconcile(
 }
 
 static void
-fill_xforms(struct n3iwf_dp_ipsec_sa *runtime,
-            const struct n3iwf_dp_child_sa_wire *wire)
+fill_xforms(struct n3iwf_up_ipsec_sa *runtime,
+            const struct n3iwf_up_child_sa_wire *wire)
 {
     runtime->inbound_auth.type = RTE_CRYPTO_SYM_XFORM_AUTH;
     runtime->inbound_auth.auth.op = RTE_CRYPTO_AUTH_OP_VERIFY;
@@ -236,7 +237,7 @@ fill_xforms(struct n3iwf_dp_ipsec_sa *runtime,
     runtime->inbound_auth.auth.key.data =
         (uint8_t *)wire->inbound_integrity_key;
     runtime->inbound_auth.auth.key.length = wire->inbound_integrity_key_len;
-    runtime->inbound_auth.auth.digest_length = N3IWF_DP_SHA1_96_LEN;
+    runtime->inbound_auth.auth.digest_length = N3IWF_UP_SHA1_96_LEN;
     runtime->inbound_auth.next = &runtime->inbound_cipher;
 
     runtime->inbound_cipher.type = RTE_CRYPTO_SYM_XFORM_CIPHER;
@@ -247,7 +248,7 @@ fill_xforms(struct n3iwf_dp_ipsec_sa *runtime,
     runtime->inbound_cipher.cipher.key.length =
         wire->inbound_encryption_key_len;
     runtime->inbound_cipher.cipher.iv.offset = IPSEC_IV_OFFSET;
-    runtime->inbound_cipher.cipher.iv.length = N3IWF_DP_AES_CBC_IV_LEN;
+    runtime->inbound_cipher.cipher.iv.length = N3IWF_UP_AES_CBC_IV_LEN;
 
     runtime->outbound_cipher.type = RTE_CRYPTO_SYM_XFORM_CIPHER;
     runtime->outbound_cipher.cipher.op = RTE_CRYPTO_CIPHER_OP_ENCRYPT;
@@ -257,7 +258,7 @@ fill_xforms(struct n3iwf_dp_ipsec_sa *runtime,
     runtime->outbound_cipher.cipher.key.length =
         wire->outbound_encryption_key_len;
     runtime->outbound_cipher.cipher.iv.offset = IPSEC_IV_OFFSET;
-    runtime->outbound_cipher.cipher.iv.length = N3IWF_DP_AES_CBC_IV_LEN;
+    runtime->outbound_cipher.cipher.iv.length = N3IWF_UP_AES_CBC_IV_LEN;
     runtime->outbound_cipher.next = &runtime->outbound_auth;
 
     runtime->outbound_auth.type = RTE_CRYPTO_SYM_XFORM_AUTH;
@@ -266,15 +267,15 @@ fill_xforms(struct n3iwf_dp_ipsec_sa *runtime,
     runtime->outbound_auth.auth.key.data =
         (uint8_t *)wire->outbound_integrity_key;
     runtime->outbound_auth.auth.key.length = wire->outbound_integrity_key_len;
-    runtime->outbound_auth.auth.digest_length = N3IWF_DP_SHA1_96_LEN;
+    runtime->outbound_auth.auth.digest_length = N3IWF_UP_SHA1_96_LEN;
 }
 
 static int
-init_direction(struct n3iwf_dp_ipsec *ipsec,
-               struct n3iwf_dp_ipsec_sa *runtime,
-               const struct n3iwf_dp_child_sa *child, bool inbound)
+init_direction(struct n3iwf_up_ipsec *ipsec,
+               struct n3iwf_up_ipsec_sa *runtime,
+               const struct n3iwf_up_child_sa *child, bool inbound)
 {
-    const struct n3iwf_dp_child_sa_wire *wire = &child->parameters;
+    const struct n3iwf_up_child_sa_wire *wire = &child->parameters;
     struct rte_crypto_sym_xform *xform = inbound ? &runtime->inbound_auth :
                                                   &runtime->outbound_cipher;
     struct rte_cryptodev_sym_session **crypto = inbound ?
@@ -342,16 +343,16 @@ init_direction(struct n3iwf_dp_ipsec *ipsec,
     return rte_ipsec_session_prepare(session);
 }
 
-static struct n3iwf_dp_ipsec_sa *
-runtime_sa(struct n3iwf_dp_ipsec *ipsec,
-           const struct n3iwf_dp_child_sa *child, uint32_t child_index)
+static struct n3iwf_up_ipsec_sa *
+runtime_sa(struct n3iwf_up_ipsec *ipsec,
+           const struct n3iwf_up_child_sa *child, uint32_t child_index)
 {
-    struct n3iwf_dp_ipsec_sa *runtime;
+    struct n3iwf_up_ipsec_sa *runtime;
     uint32_t spi = ntohl(child->parameters.inbound_spi);
     static uint32_t reported_failures;
     int result;
 
-    if (child_index >= N3IWF_DP_MAX_CHILD_SAS) {
+    if (child_index >= N3IWF_UP_MAX_CHILD_SAS) {
         return NULL;
     }
     runtime = &ipsec->sas[child_index];
@@ -362,7 +363,7 @@ runtime_sa(struct n3iwf_dp_ipsec *ipsec,
     if (runtime->used) {
         release_runtime_sa(ipsec, runtime);
     }
-    if (!n3iwf_dp_child_sa_profile_supported(&child->parameters)) {
+    if (!n3iwf_up_child_sa_profile_supported(&child->parameters)) {
         return NULL;
     }
     fill_xforms(runtime, &child->parameters);
@@ -370,7 +371,7 @@ runtime_sa(struct n3iwf_dp_ipsec *ipsec,
     if (result != 0) {
         if (reported_failures++ < 8U) {
             fprintf(stderr,
-                    "N3IWF-DP IPsec runtime SA creation failed: "
+                    "N3IWF-UP IPsec runtime SA creation failed: "
                     "direction=inbound SPI=0x%08x error=%d (%s)\n",
                     spi, result, rte_strerror(-result));
         }
@@ -381,7 +382,7 @@ runtime_sa(struct n3iwf_dp_ipsec *ipsec,
     if (result != 0) {
         if (reported_failures++ < 8U) {
             fprintf(stderr,
-                    "N3IWF-DP IPsec runtime SA creation failed: "
+                    "N3IWF-UP IPsec runtime SA creation failed: "
                     "direction=outbound SPI=0x%08x error=%d (%s)\n",
                     ntohl(child->parameters.outbound_spi), result,
                     rte_strerror(-result));
@@ -431,7 +432,8 @@ ipv4_esp_spi(const struct rte_mbuf *packet, uint32_t *spi)
 
 static int
 cpu_crypto(struct rte_ipsec_session *session, struct rte_mbuf *packet,
-           uint32_t spi, const char *direction)
+           uint32_t spi, const char *direction,
+           struct n3iwf_up_cycle_profile_direction *profile)
 {
     struct rte_mbuf *packets[1] = {packet};
     const uint8_t *data = rte_pktmbuf_mtod(packet, const uint8_t *);
@@ -441,11 +443,17 @@ cpu_crypto(struct rte_ipsec_session *session, struct rte_mbuf *packet,
     uint16_t prepared;
     uint16_t processed;
     int prepare_error;
+    uint64_t prepare_start = 0;
+    uint64_t process_start;
+    uint64_t post_start;
     static uint32_t reported_failures;
 
     if (rte_pktmbuf_pkt_len(packet) < sizeof(struct rte_ether_hdr) +
                                       sizeof(*ipv4)) {
         return -EMSGSIZE;
+    }
+    if (profile != NULL) {
+        prepare_start = rte_rdtsc();
     }
     memcpy(&ethernet, data, sizeof(ethernet));
     ipv4 = (const struct rte_ipv4_hdr *)(data + sizeof(struct rte_ether_hdr));
@@ -454,11 +462,15 @@ cpu_crypto(struct rte_ipsec_session *session, struct rte_mbuf *packet,
 
     rte_errno = 0;
     prepared = rte_ipsec_pkt_cpu_prepare(session, packets, 1);
+    process_start = profile == NULL ? 0 : rte_rdtsc();
+    if (profile != NULL) {
+        profile->crypto_prepare_cycles += process_start - prepare_start;
+    }
     if (prepared != 1) {
         prepare_error = rte_errno == 0 ? EPROTO : rte_errno;
         if (reported_failures++ < 8U) {
             fprintf(stderr,
-                    "N3IWF-DP IPsec %s prepare failed: SPI=0x%08x "
+                    "N3IWF-UP IPsec %s prepare failed: SPI=0x%08x "
                     "errno=%d (%s) packet_len=%u l2=%u l3=%u\n",
                     direction, spi, rte_errno, rte_strerror(rte_errno),
                     rte_pktmbuf_pkt_len(packet), packet->l2_len,
@@ -467,10 +479,14 @@ cpu_crypto(struct rte_ipsec_session *session, struct rte_mbuf *packet,
         return -prepare_error;
     }
     processed = rte_ipsec_pkt_process(session, packets, 1);
+    post_start = profile == NULL ? 0 : rte_rdtsc();
+    if (profile != NULL) {
+        profile->crypto_process_cycles += post_start - process_start;
+    }
     if (processed != 1) {
         if (reported_failures++ < 8U) {
             fprintf(stderr,
-                    "N3IWF-DP IPsec %s authentication/post-process failed: "
+                    "N3IWF-UP IPsec %s authentication/post-process failed: "
                     "SPI=0x%08x errno=%d (%s) ol_flags=0x%016" PRIx64
                     " packet_len=%u\n",
                     direction, spi, rte_errno, rte_strerror(rte_errno),
@@ -509,17 +525,21 @@ cpu_crypto(struct rte_ipsec_session *session, struct rte_mbuf *packet,
         rte_ipv4_cksum((const struct rte_ipv4_hdr *)ipv4);
     packet->l2_len = sizeof(ethernet);
     packet->l3_len = (uint16_t)((ipv4->version_ihl & 0x0fU) * 4U);
+    if (profile != NULL) {
+        profile->crypto_post_cycles += rte_rdtsc() - post_start;
+    }
     return 0;
 }
 
 int
-n3iwf_dp_handle_ipsec_packet(
+n3iwf_up_handle_ipsec_packet(
     struct rte_mbuf *packet, struct onvm_pkt_meta *meta,
-    struct n3iwf_dp_session_table *sessions,
-    struct n3iwf_dp_child_sa_table *child_sas,
-    struct n3iwf_dp_ipsec *ipsec, struct n3iwf_dp_stats_wire *stats,
+    struct n3iwf_up_session_table *sessions,
+    struct n3iwf_up_child_sa_table *child_sas,
+    struct n3iwf_up_ipsec *ipsec, struct n3iwf_up_stats_wire *stats,
+    struct n3iwf_up_cycle_profile *profile,
     uint16_t upf_service_id, uint16_t access_port,
-    const uint8_t access_mac[N3IWF_DP_ETHER_ADDR_LEN])
+    const uint8_t access_mac[N3IWF_UP_ETHER_ADDR_LEN])
 {
     if (packet == NULL || meta == NULL || sessions == NULL ||
         child_sas == NULL || ipsec == NULL || !ipsec->ready || stats == NULL) {
@@ -535,11 +555,13 @@ n3iwf_dp_handle_ipsec_packet(
     if (meta->src == 0) {
         uint32_t spi;
         uint32_t child_index;
-        const struct n3iwf_dp_child_sa *child;
-        struct n3iwf_dp_session *bound_session;
-        struct n3iwf_dp_ipsec_sa *runtime;
+        const struct n3iwf_up_child_sa *child;
+        struct n3iwf_up_session *bound_session;
+        struct n3iwf_up_ipsec_sa *runtime;
         int parse_result;
+        int transform_result;
         static uint32_t reported_classification_failures;
+        uint64_t stage_start = profile == NULL ? 0 : rte_rdtsc();
 
         parse_result = ipv4_esp_spi(packet, &spi);
         if (parse_result == -EINPROGRESS) {
@@ -568,7 +590,7 @@ n3iwf_dp_handle_ipsec_packet(
                     }
                 }
                 fprintf(stderr,
-                        "N3IWF-DP physical ingress is not IPv4 ESP: "
+                        "N3IWF-UP physical ingress is not IPv4 ESP: "
                         "mbuf_port=%u configured_access_port=%u "
                         "ether_type=0x%04x next_header=%u error=%d (%s)\n",
                         packet->port, access_port, ether_type, next_header,
@@ -576,12 +598,12 @@ n3iwf_dp_handle_ipsec_packet(
             }
             return -EPROTONOSUPPORT;
         }
-        child = n3iwf_dp_child_sa_find_inbound_at(child_sas, spi,
+        child = n3iwf_up_child_sa_find_inbound_at(child_sas, spi,
                                                   &child_index);
         if (child == NULL || ntohl(child->parameters.pdu_session_id) == 0) {
             return -ENOENT;
         }
-        bound_session = n3iwf_dp_child_sa_get_bound_session(child, sessions);
+        bound_session = n3iwf_up_child_sa_get_bound_session(child, sessions);
         if (bound_session == NULL) {
             return -ENOENT;
         }
@@ -590,7 +612,11 @@ n3iwf_dp_handle_ipsec_packet(
             ++stats->crypto_failures;
             return -EBADMSG;
         }
-        parse_result = cpu_crypto(&runtime->inbound, packet, spi, "inbound");
+        if (profile != NULL) {
+            profile->uplink.pre_crypto_cycles += rte_rdtsc() - stage_start;
+        }
+        parse_result = cpu_crypto(&runtime->inbound, packet, spi, "inbound",
+                                  profile == NULL ? NULL : &profile->uplink);
         if (parse_result != 0) {
             if (parse_result == -EINVAL) {
                 ++stats->replay_drops;
@@ -599,18 +625,32 @@ n3iwf_dp_handle_ipsec_packet(
             }
             return parse_result;
         }
-        return n3iwf_dp_handle_authenticated_uplink(
+        stage_start = profile == NULL ? 0 : rte_rdtsc();
+        transform_result = n3iwf_up_handle_authenticated_uplink(
             packet, meta, bound_session, stats, upf_service_id, access_mac);
+        if (profile != NULL) {
+            profile->uplink.header_transform_cycles +=
+                rte_rdtsc() - stage_start;
+            if (transform_result == 0) {
+                ++profile->uplink.packets;
+            }
+        }
+        return transform_result;
     }
     {
-        const struct n3iwf_dp_session *session = NULL;
+        const struct n3iwf_up_session *session = NULL;
+        uint64_t stage_start = profile == NULL ? 0 : rte_rdtsc();
+        int clear_result;
 
-        if (n3iwf_dp_handle_clear_downlink_selected(
-                packet, meta, sessions, stats, access_port, access_mac,
-                &session) == 0 &&
-            meta->action == ONVM_NF_ACTION_OUT) {
-            const struct n3iwf_dp_child_sa *child;
-            struct n3iwf_dp_ipsec_sa *runtime;
+        clear_result = n3iwf_up_handle_clear_downlink_selected(
+            packet, meta, sessions, stats, access_port, access_mac, &session);
+        if (profile != NULL) {
+            profile->downlink.header_transform_cycles +=
+                rte_rdtsc() - stage_start;
+        }
+        if (clear_result == 0 && meta->action == ONVM_NF_ACTION_OUT) {
+            const struct n3iwf_up_child_sa *child;
+            struct n3iwf_up_ipsec_sa *runtime;
             uint32_t child_index;
 
             if (session == NULL) {
@@ -618,14 +658,20 @@ n3iwf_dp_handle_ipsec_packet(
                 meta->action = ONVM_NF_ACTION_DROP;
                 return -ENOENT;
             }
-            child = n3iwf_dp_child_sa_get_active_outbound(
+            stage_start = profile == NULL ? 0 : rte_rdtsc();
+            child = n3iwf_up_child_sa_get_active_outbound(
                 child_sas, session, &child_index);
             runtime = child == NULL ? NULL :
                 runtime_sa(ipsec, child, child_index);
+            if (profile != NULL) {
+                profile->downlink.pre_crypto_cycles +=
+                    rte_rdtsc() - stage_start;
+            }
             if (runtime == NULL ||
                 cpu_crypto(&runtime->outbound, packet,
                            ntohl(child->parameters.outbound_spi),
-                           "outbound") != 0) {
+                           "outbound", profile == NULL ? NULL :
+                               &profile->downlink) != 0) {
                 ++stats->crypto_failures;
                 if (stats->downlink_packets != 0) {
                     --stats->downlink_packets;
@@ -635,6 +681,9 @@ n3iwf_dp_handle_ipsec_packet(
             }
             meta->action = ONVM_NF_ACTION_OUT;
             meta->destination = access_port;
+            if (profile != NULL) {
+                ++profile->downlink.packets;
+            }
             return 0;
         }
     }

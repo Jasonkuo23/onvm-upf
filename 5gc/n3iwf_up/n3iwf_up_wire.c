@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "n3iwf_dp_wire.h"
+#include "n3iwf_up_wire.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -25,11 +25,11 @@ be64_to_host(uint64_t value)
 }
 
 int
-n3iwf_dp_wire_validate(const uint8_t *message, size_t message_len,
+n3iwf_up_wire_validate(const uint8_t *message, size_t message_len,
                        uint16_t *type, uint64_t *generation,
                        const uint8_t **payload, size_t *payload_len)
 {
-    struct n3iwf_dp_wire_header header;
+    struct n3iwf_up_wire_header header;
     size_t declared_len;
 
     if (message == NULL || type == NULL || generation == NULL ||
@@ -39,10 +39,10 @@ n3iwf_dp_wire_validate(const uint8_t *message, size_t message_len,
     }
     memcpy(&header, message, sizeof(header));
     declared_len = ntohl(header.length);
-    if (ntohl(header.magic) != N3IWF_DP_WIRE_MAGIC) {
+    if (ntohl(header.magic) != N3IWF_UP_WIRE_MAGIC) {
         return -EBADMSG;
     }
-    if (ntohs(header.version) != N3IWF_DP_WIRE_VERSION) {
+    if (ntohs(header.version) != N3IWF_UP_WIRE_VERSION) {
         return -EPROTONOSUPPORT;
     }
     if (declared_len != message_len || declared_len < sizeof(header)) {
@@ -57,21 +57,21 @@ n3iwf_dp_wire_validate(const uint8_t *message, size_t message_len,
 }
 
 size_t
-n3iwf_dp_wire_encode_ack(uint8_t *out, size_t capacity, uint32_t transaction_id,
-                         uint64_t generation, enum n3iwf_dp_status status,
+n3iwf_up_wire_encode_ack(uint8_t *out, size_t capacity, uint32_t transaction_id,
+                         uint64_t generation, enum n3iwf_up_status status,
                          uint32_t detail)
 {
-    struct n3iwf_dp_wire_header header;
-    struct n3iwf_dp_ack_wire ack;
+    struct n3iwf_up_wire_header header;
+    struct n3iwf_up_ack_wire ack;
     const size_t total_len = sizeof(header) + sizeof(ack);
 
     if (out == NULL || capacity < total_len) {
         return 0;
     }
     memset(&header, 0, sizeof(header));
-    header.magic = htonl(N3IWF_DP_WIRE_MAGIC);
-    header.version = htons(N3IWF_DP_WIRE_VERSION);
-    header.type = htons(N3IWF_DP_MSG_ACK);
+    header.magic = htonl(N3IWF_UP_WIRE_MAGIC);
+    header.version = htons(N3IWF_UP_WIRE_VERSION);
+    header.type = htons(N3IWF_UP_MSG_ACK);
     header.length = htonl((uint32_t)total_len);
     header.transaction_id = htonl(transaction_id);
     header.generation = host_to_be64(generation);

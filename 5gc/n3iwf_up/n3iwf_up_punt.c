@@ -4,7 +4,7 @@
 
 #define _DEFAULT_SOURCE
 
-#include "n3iwf_dp_punt.h"
+#include "n3iwf_up_punt.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -59,11 +59,11 @@ classify_arp(const uint8_t *arp, size_t length, uint32_t local_ipv4_be,
     if (read_be16(arp) != 1 || read_be16(arp + 2) != ETHERTYPE_IPV4 ||
         arp[4] != 6 || arp[5] != 4 ||
         (read_be16(arp + 6) != 1 && read_be16(arp + 6) != 2)) {
-        return N3IWF_DP_PUNT_NONE;
+        return N3IWF_UP_PUNT_NONE;
     }
     address = to_cp ? arp + 24 : arp + 14;
-    return ipv4_matches(address, local_ipv4_be) ? N3IWF_DP_PUNT_ARP :
-                                                  N3IWF_DP_PUNT_NONE;
+    return ipv4_matches(address, local_ipv4_be) ? N3IWF_UP_PUNT_ARP :
+                                                  N3IWF_UP_PUNT_NONE;
 }
 
 static int
@@ -84,10 +84,10 @@ classify_udp(const uint8_t *udp, size_t length, bool to_cp,
     }
     port = read_be16(udp + (to_cp ? 2 : 0));
     if (port == IKE_PORT) {
-        return N3IWF_DP_PUNT_IKE;
+        return N3IWF_UP_PUNT_IKE;
     }
     if (port != NAT_T_PORT) {
-        return N3IWF_DP_PUNT_NONE;
+        return N3IWF_UP_PUNT_NONE;
     }
 
     payload = udp + UDP_HEADER_LENGTH;
@@ -95,13 +95,13 @@ classify_udp(const uint8_t *udp, size_t length, bool to_cp,
     /* RFC 3948: zero Non-ESP Marker identifies IKE; 0xff is keepalive. */
     if ((payload_length >= 4 && read_be32(payload) == 0) ||
         (payload_length == 1 && payload[0] == 0xff)) {
-        return N3IWF_DP_PUNT_IKE;
+        return N3IWF_UP_PUNT_IKE;
     }
     if (payload_length < 8) {
         return -EMSGSIZE;
     }
-    return allow_kernel_signalling_esp ? N3IWF_DP_PUNT_ESP :
-                                        N3IWF_DP_PUNT_NONE;
+    return allow_kernel_signalling_esp ? N3IWF_UP_PUNT_ESP :
+                                        N3IWF_UP_PUNT_NONE;
 }
 
 static int
@@ -128,17 +128,17 @@ classify_ipv4(const uint8_t *ip, size_t length, uint32_t local_ipv4_be,
     }
     local_address = ip + (to_cp ? 16 : 12);
     if (!ipv4_matches(local_address, local_ipv4_be)) {
-        return N3IWF_DP_PUNT_NONE;
+        return N3IWF_UP_PUNT_NONE;
     }
     if (ip[9] == IPPROTO_ESP_VALUE) {
         if (total_length - header_length < 8) {
             return -EMSGSIZE;
         }
-        return allow_kernel_signalling_esp ? N3IWF_DP_PUNT_ESP :
-                                            N3IWF_DP_PUNT_NONE;
+        return allow_kernel_signalling_esp ? N3IWF_UP_PUNT_ESP :
+                                            N3IWF_UP_PUNT_NONE;
     }
     if (ip[9] != IPPROTO_UDP_VALUE) {
-        return N3IWF_DP_PUNT_NONE;
+        return N3IWF_UP_PUNT_NONE;
     }
     return classify_udp(ip + header_length, total_length - header_length,
                         to_cp, allow_kernel_signalling_esp);
@@ -164,11 +164,11 @@ classify(const uint8_t *frame, size_t length, uint32_t local_ipv4_be,
                              length - ETHERNET_HEADER_LENGTH, local_ipv4_be,
                              to_cp, allow_kernel_signalling_esp);
     }
-    return N3IWF_DP_PUNT_NONE;
+    return N3IWF_UP_PUNT_NONE;
 }
 
 int
-n3iwf_dp_punt_classify_to_cp(const uint8_t *frame, size_t length,
+n3iwf_up_punt_classify_to_cp(const uint8_t *frame, size_t length,
                              uint32_t local_ipv4_be,
                              bool allow_kernel_signalling_esp)
 {
@@ -177,7 +177,7 @@ n3iwf_dp_punt_classify_to_cp(const uint8_t *frame, size_t length,
 }
 
 int
-n3iwf_dp_punt_classify_from_cp(const uint8_t *frame, size_t length,
+n3iwf_up_punt_classify_from_cp(const uint8_t *frame, size_t length,
                                uint32_t local_ipv4_be,
                                bool allow_kernel_signalling_esp)
 {
@@ -186,7 +186,7 @@ n3iwf_dp_punt_classify_from_cp(const uint8_t *frame, size_t length,
 }
 
 int
-n3iwf_dp_punt_open(struct n3iwf_dp_punt *punt, const char *ifname,
+n3iwf_up_punt_open(struct n3iwf_up_punt *punt, const char *ifname,
                    const char *local_ipv4)
 {
     struct ifreq request;
@@ -226,7 +226,7 @@ n3iwf_dp_punt_open(struct n3iwf_dp_punt *punt, const char *ifname,
 }
 
 void
-n3iwf_dp_punt_close(struct n3iwf_dp_punt *punt)
+n3iwf_up_punt_close(struct n3iwf_up_punt *punt)
 {
     if (punt != NULL && punt->fd >= 0) {
         close(punt->fd);
@@ -235,7 +235,7 @@ n3iwf_dp_punt_close(struct n3iwf_dp_punt *punt)
 }
 
 ssize_t
-n3iwf_dp_punt_read(struct n3iwf_dp_punt *punt, void *frame, size_t capacity)
+n3iwf_up_punt_read(struct n3iwf_up_punt *punt, void *frame, size_t capacity)
 {
     ssize_t result;
 
@@ -247,7 +247,7 @@ n3iwf_dp_punt_read(struct n3iwf_dp_punt *punt, void *frame, size_t capacity)
 }
 
 ssize_t
-n3iwf_dp_punt_write(struct n3iwf_dp_punt *punt, const void *frame,
+n3iwf_up_punt_write(struct n3iwf_up_punt *punt, const void *frame,
                     size_t length)
 {
     ssize_t result;

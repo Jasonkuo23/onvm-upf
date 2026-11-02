@@ -1,61 +1,61 @@
 /*
  * Versioned control-plane/data-plane contract for L25GC+ N3IWF.
  *
- * All multi-octet integer fields are network byte order. Socket transport is
- * AF_UNIX/SOCK_SEQPACKET so one datagram contains exactly one message.
+ * All multi-octet integer fields are network byte order. Transport uses
+ * DPDK memzone/rte_ring; one queue entry contains exactly one message.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef N3IWF_DP_WIRE_H
-#define N3IWF_DP_WIRE_H
+#ifndef N3IWF_UP_WIRE_H
+#define N3IWF_UP_WIRE_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#define N3IWF_DP_WIRE_MAGIC 0x4e334450U /* "N3DP" */
-#define N3IWF_DP_WIRE_VERSION 1U
-#define N3IWF_DP_MAX_QFI 63U
-#define N3IWF_DP_ADDR_LEN 16U
-#define N3IWF_DP_MAX_KEY_LEN 64U
+#define N3IWF_UP_WIRE_MAGIC 0x4e334450U /* "N3DP" */
+#define N3IWF_UP_WIRE_VERSION 1U
+#define N3IWF_UP_MAX_QFI 63U
+#define N3IWF_UP_ADDR_LEN 16U
+#define N3IWF_UP_MAX_KEY_LEN 64U
 
-enum n3iwf_dp_message_type {
-    N3IWF_DP_MSG_HELLO = 1,
-    N3IWF_DP_MSG_SESSION_UPSERT = 2,
-    N3IWF_DP_MSG_SESSION_DELETE = 3,
-    N3IWF_DP_MSG_CHILD_SA_UPSERT = 4,
-    N3IWF_DP_MSG_CHILD_SA_DELETE = 5,
-    N3IWF_DP_MSG_STATS_GET = 6,
-    N3IWF_DP_MSG_ACK = 0x8000,
-    N3IWF_DP_MSG_STATS = 0x8001,
+enum n3iwf_up_message_type {
+    N3IWF_UP_MSG_HELLO = 1,
+    N3IWF_UP_MSG_SESSION_UPSERT = 2,
+    N3IWF_UP_MSG_SESSION_DELETE = 3,
+    N3IWF_UP_MSG_CHILD_SA_UPSERT = 4,
+    N3IWF_UP_MSG_CHILD_SA_DELETE = 5,
+    N3IWF_UP_MSG_STATS_GET = 6,
+    N3IWF_UP_MSG_ACK = 0x8000,
+    N3IWF_UP_MSG_STATS = 0x8001,
 };
 
-enum n3iwf_dp_status {
-    N3IWF_DP_STATUS_OK = 0,
-    N3IWF_DP_STATUS_BAD_MESSAGE = 1,
-    N3IWF_DP_STATUS_UNSUPPORTED_VERSION = 2,
-    N3IWF_DP_STATUS_STALE_GENERATION = 3,
-    N3IWF_DP_STATUS_NOT_FOUND = 4,
-    N3IWF_DP_STATUS_CAPACITY = 5,
-    N3IWF_DP_STATUS_UNSUPPORTED = 6,
+enum n3iwf_up_status {
+    N3IWF_UP_STATUS_OK = 0,
+    N3IWF_UP_STATUS_BAD_MESSAGE = 1,
+    N3IWF_UP_STATUS_UNSUPPORTED_VERSION = 2,
+    N3IWF_UP_STATUS_STALE_GENERATION = 3,
+    N3IWF_UP_STATUS_NOT_FOUND = 4,
+    N3IWF_UP_STATUS_CAPACITY = 5,
+    N3IWF_UP_STATUS_UNSUPPORTED = 6,
 };
 
-enum n3iwf_dp_address_family {
-    N3IWF_DP_AF_IPV4 = 4,
-    N3IWF_DP_AF_IPV6 = 6,
+enum n3iwf_up_address_family {
+    N3IWF_UP_AF_IPV4 = 4,
+    N3IWF_UP_AF_IPV6 = 6,
 };
 
-enum n3iwf_dp_client_role {
-    N3IWF_DP_ROLE_WRITER = 1,
-    N3IWF_DP_ROLE_OBSERVER = 2,
+enum n3iwf_up_client_role {
+    N3IWF_UP_ROLE_WRITER = 1,
+    N3IWF_UP_ROLE_OBSERVER = 2,
 };
 
-enum n3iwf_dp_child_sa_flags {
-    N3IWF_DP_CHILD_SA_NAT_T = 1U << 0,
-    N3IWF_DP_CHILD_SA_ESN = 1U << 1,
+enum n3iwf_up_child_sa_flags {
+    N3IWF_UP_CHILD_SA_NAT_T = 1U << 0,
+    N3IWF_UP_CHILD_SA_ESN = 1U << 1,
 };
 
-struct n3iwf_dp_wire_header {
+struct n3iwf_up_wire_header {
     uint32_t magic;
     uint16_t version;
     uint16_t type;
@@ -64,7 +64,7 @@ struct n3iwf_dp_wire_header {
     uint64_t generation;
 } __attribute__((packed));
 
-struct n3iwf_dp_session_wire {
+struct n3iwf_up_session_wire {
     uint64_t ue_id;
     uint32_t pdu_session_id;
     uint32_t uplink_teid;
@@ -72,20 +72,20 @@ struct n3iwf_dp_session_wire {
     uint8_t address_family;
     uint8_t qfi_count;
     uint8_t reserved[2];
-    uint8_t ue_pdu_address[N3IWF_DP_ADDR_LEN];
-    uint8_t n3iwf_nwu_address[N3IWF_DP_ADDR_LEN];
-    uint8_t ue_nwu_address[N3IWF_DP_ADDR_LEN];
-    uint8_t n3iwf_n3_address[N3IWF_DP_ADDR_LEN];
-    uint8_t upf_n3_address[N3IWF_DP_ADDR_LEN];
-    uint8_t qfi[N3IWF_DP_MAX_QFI];
+    uint8_t ue_pdu_address[N3IWF_UP_ADDR_LEN];
+    uint8_t n3iwf_nwu_address[N3IWF_UP_ADDR_LEN];
+    uint8_t ue_nwu_address[N3IWF_UP_ADDR_LEN];
+    uint8_t n3iwf_n3_address[N3IWF_UP_ADDR_LEN];
+    uint8_t upf_n3_address[N3IWF_UP_ADDR_LEN];
+    uint8_t qfi[N3IWF_UP_MAX_QFI];
 } __attribute__((packed));
 
-struct n3iwf_dp_session_delete_wire {
+struct n3iwf_up_session_delete_wire {
     uint64_t ue_id;
     uint32_t pdu_session_id;
 } __attribute__((packed));
 
-struct n3iwf_dp_hello_wire {
+struct n3iwf_up_hello_wire {
     uint8_t role;
     uint8_t reserved[3];
 } __attribute__((packed));
@@ -95,7 +95,7 @@ struct n3iwf_dp_hello_wire {
  * Transform IDs from RFC 7296/IANA, not implementation-specific enums.
  * Keys are directionally explicit from the N3IWF point of view.
  */
-struct n3iwf_dp_child_sa_wire {
+struct n3iwf_up_child_sa_wire {
     uint64_t ue_id;
     uint32_t pdu_session_id; /* zero for the signalling Child SA */
     uint32_t inbound_spi;    /* UE -> N3IWF */
@@ -116,29 +116,29 @@ struct n3iwf_dp_child_sa_wire {
     uint8_t outbound_encryption_key_len;
     uint8_t outbound_integrity_key_len;
     uint8_t reserved[2];
-    uint8_t local_address[N3IWF_DP_ADDR_LEN];
-    uint8_t peer_address[N3IWF_DP_ADDR_LEN];
-    uint8_t local_selector[N3IWF_DP_ADDR_LEN];
-    uint8_t peer_selector[N3IWF_DP_ADDR_LEN];
-    uint8_t inbound_encryption_key[N3IWF_DP_MAX_KEY_LEN];
-    uint8_t inbound_integrity_key[N3IWF_DP_MAX_KEY_LEN];
-    uint8_t outbound_encryption_key[N3IWF_DP_MAX_KEY_LEN];
-    uint8_t outbound_integrity_key[N3IWF_DP_MAX_KEY_LEN];
+    uint8_t local_address[N3IWF_UP_ADDR_LEN];
+    uint8_t peer_address[N3IWF_UP_ADDR_LEN];
+    uint8_t local_selector[N3IWF_UP_ADDR_LEN];
+    uint8_t peer_selector[N3IWF_UP_ADDR_LEN];
+    uint8_t inbound_encryption_key[N3IWF_UP_MAX_KEY_LEN];
+    uint8_t inbound_integrity_key[N3IWF_UP_MAX_KEY_LEN];
+    uint8_t outbound_encryption_key[N3IWF_UP_MAX_KEY_LEN];
+    uint8_t outbound_integrity_key[N3IWF_UP_MAX_KEY_LEN];
 } __attribute__((packed));
 
-struct n3iwf_dp_child_sa_delete_wire {
+struct n3iwf_up_child_sa_delete_wire {
     uint64_t ue_id;
     uint32_t pdu_session_id;
     uint32_t inbound_spi;
 } __attribute__((packed));
 
-struct n3iwf_dp_ack_wire {
+struct n3iwf_up_ack_wire {
     uint32_t status;
     uint32_t detail;
     uint64_t applied_generation;
 } __attribute__((packed));
 
-struct n3iwf_dp_stats_wire {
+struct n3iwf_up_stats_wire {
     uint64_t uplink_packets;
     uint64_t downlink_packets;
     uint64_t unknown_teid;
@@ -162,13 +162,13 @@ struct n3iwf_dp_stats_wire {
 } __attribute__((packed));
 
 int
-n3iwf_dp_wire_validate(const uint8_t *message, size_t message_len,
+n3iwf_up_wire_validate(const uint8_t *message, size_t message_len,
                        uint16_t *type, uint64_t *generation,
                        const uint8_t **payload, size_t *payload_len);
 
 size_t
-n3iwf_dp_wire_encode_ack(uint8_t *out, size_t capacity, uint32_t transaction_id,
-                         uint64_t generation, enum n3iwf_dp_status status,
+n3iwf_up_wire_encode_ack(uint8_t *out, size_t capacity, uint32_t transaction_id,
+                         uint64_t generation, enum n3iwf_up_status status,
                          uint32_t detail);
 
 #endif
